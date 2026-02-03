@@ -180,7 +180,7 @@ function connectPrinter(printer) {
     client.publish('device/' + printer.serialNumber + '/request', JSON.stringify({
       pushing: { command: 'pushall' }
     }));
-    addCameraStream(printer.serialNumber, printer.accessCode, printer.ipAddress);
+    addCameraStream(printer.serialNumber, printer.accessCode, printer.ipAddress, printer.model);
     updatePrinters();
   });
 
@@ -462,7 +462,7 @@ function startGo2rtc() {
     // Pending Streams hinzufügen
     if (pendingStreams.length > 0) {
       sendLog('Füge ' + pendingStreams.length + ' wartende Streams hinzu...');
-      pendingStreams.forEach(s => addCameraStream(s.serial, s.accessCode, s.ip));
+      pendingStreams.forEach(s => addCameraStream(s.serial, s.accessCode, s.ip, s.model));
       pendingStreams = [];
     }
 
@@ -518,15 +518,21 @@ function startTunnel() {
   });
 }
 
-function addCameraStream(serial, accessCode, ip) {
+function addCameraStream(serial, accessCode, ip, model) {
   if (!go2rtcReady) {
     sendLog('go2rtc nicht bereit, Stream ' + serial + ' wird in Warteschlange gestellt');
-    pendingStreams.push({ serial, accessCode, ip });
+    pendingStreams.push({ serial, accessCode, ip, model });
     return;
   }
 
+  // A1/A1 Mini nutzen Port 6000, andere Modelle Port 322
+  const isA1 = model && (model.includes('A1') || model.toLowerCase().includes('a1'));
+  const port = isA1 ? 6000 : 322;
+
   const streamName = 'cam_' + serial;
-  const streamUrl = 'rtspx://bblp:' + accessCode + '@' + ip + ':322/streaming/live/1';
+  const streamUrl = 'rtspx://bblp:' + accessCode + '@' + ip + ':' + port + '/streaming/live/1';
+
+  sendLog('Stream für ' + (model || 'unbekannt') + ' auf Port ' + port);
 
   // Stream zur Map hinzufügen
   cameraStreams.set(streamName, streamUrl);
