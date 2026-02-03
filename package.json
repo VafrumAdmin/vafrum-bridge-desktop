@@ -1,6 +1,6 @@
 {
   "name": "vafrum-bridge-desktop",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Vafrum Bridge Desktop - Bambu Lab Printer Manager",
   "author": "Vafrum <info@vafrum.de>",
   "homepage": "https://github.com/VafrumAdmin/vafrum-bridge-desktop",
@@ -26,7 +26,8 @@
     },
     "nsis": {
       "oneClick": false,
-      "allowToChangeInstallationDirectory": true
+      "allowToChangeInstallationDirectory": true,
+      "artifactName": "VafrumBridge-Setup-${version}.${ext}"
     },
     "publish": {
       "provider": "github",
