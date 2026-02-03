@@ -423,9 +423,12 @@ function getLocalIp() {
   return 'localhost';
 }
 
+let pendingStreams = []; // Streams die vor go2rtc-Start ankommen
+
 function startGo2rtc() {
   const portableDir = process.env.PORTABLE_EXECUTABLE_DIR || process.cwd();
   const locations = [
+    path.join(process.resourcesPath || '', 'go2rtc.exe'),
     path.join(portableDir, 'go2rtc.exe'),
     path.join(path.dirname(process.execPath), 'go2rtc.exe'),
     path.join(__dirname, 'go2rtc.exe')
@@ -433,15 +436,18 @@ function startGo2rtc() {
 
   let go2rtcPath = null;
   for (const loc of locations) {
-    if (fs.existsSync(loc)) { go2rtcPath = loc; break; }
+    if (loc && fs.existsSync(loc)) { go2rtcPath = loc; break; }
   }
 
   if (!go2rtcPath) {
-    setTimeout(() => sendLog('go2rtc.exe nicht gefunden in: ' + portableDir), 2000);
+    setTimeout(() => sendLog('go2rtc.exe nicht gefunden! Geprüft: ' + locations.join(', ')), 2000);
     return;
   }
 
-  const configFile = path.join(path.dirname(go2rtcPath), 'go2rtc.yaml');
+  sendLog('go2rtc gefunden: ' + go2rtcPath);
+
+  // Config in userData schreiben (dort haben wir Schreibrechte)
+  const configFile = path.join(app.getPath('userData'), 'go2rtc.yaml');
   fs.writeFileSync(configFile, 'api:\n  listen: ":1984"\nrtsp:\n  listen: ""\nstreams: {}\n');
 
   go2rtcProcess = spawn(go2rtcPath, ['-c', configFile], { stdio: 'ignore', windowsHide: true });
@@ -450,6 +456,13 @@ function startGo2rtc() {
   setTimeout(() => {
     go2rtcReady = true;
     sendLog('go2rtc gestartet');
+
+    // Pending Streams hinzufügen
+    if (pendingStreams.length > 0) {
+      sendLog('Füge ' + pendingStreams.length + ' wartende Streams hinzu...');
+      pendingStreams.forEach(s => addCameraStream(s.serial, s.accessCode, s.ip));
+      pendingStreams = [];
+    }
 
     // Auto-start tunnel
     startTunnel();
@@ -505,7 +518,8 @@ function startTunnel() {
 
 function addCameraStream(serial, accessCode, ip) {
   if (!go2rtcReady) {
-    sendLog('go2rtc nicht bereit, Stream wird verzögert');
+    sendLog('go2rtc nicht bereit, Stream ' + serial + ' wird in Warteschlange gestellt');
+    pendingStreams.push({ serial, accessCode, ip });
     return;
   }
 
