@@ -246,38 +246,40 @@ function connectPrinter(printer) {
           };
         }
 
+        // Vorherigen Status holen für inkrementelle Updates
+        const prevStatus = printers.get(printer.serialNumber) || {};
+
         const status = {
           online: true,
-          gcodeState: p.gcode_state || 'IDLE',
-          printProgress: p.mc_percent || 0,
-          remainingTime: p.mc_remaining_time || 0,
-          currentFile: p.gcode_file || p.subtask_name || '',
-          layer: p.layer_num || 0,
-          totalLayers: p.total_layer_num || 0,
-          nozzleTemp: p.nozzle_temper || 0,
-          nozzleTargetTemp: p.nozzle_target_temper || 0,
-          nozzleTemp2: p.nozzle_temper_2,
-          nozzleTargetTemp2: p.nozzle_target_temper_2,
-          bedTemp: p.bed_temper || 0,
-          bedTargetTemp: p.bed_target_temper || 0,
-          chamberTemp: p.chamber_temper,
+          gcodeState: p.gcode_state ?? prevStatus.gcodeState ?? 'IDLE',
+          printProgress: p.mc_percent ?? prevStatus.printProgress ?? 0,
+          remainingTime: p.mc_remaining_time ?? prevStatus.remainingTime ?? 0,
+          currentFile: p.gcode_file || p.subtask_name || prevStatus.currentFile || '',
+          layer: p.layer_num ?? prevStatus.layer ?? 0,
+          totalLayers: p.total_layer_num ?? prevStatus.totalLayers ?? 0,
+          nozzleTemp: p.nozzle_temper ?? prevStatus.nozzleTemp ?? 0,
+          nozzleTargetTemp: p.nozzle_target_temper ?? prevStatus.nozzleTargetTemp ?? 0,
+          nozzleTemp2: p.nozzle_temper_2 ?? prevStatus.nozzleTemp2,
+          nozzleTargetTemp2: p.nozzle_target_temper_2 ?? prevStatus.nozzleTargetTemp2,
+          bedTemp: p.bed_temper ?? prevStatus.bedTemp ?? 0,
+          bedTargetTemp: p.bed_target_temper ?? prevStatus.bedTargetTemp ?? 0,
+          chamberTemp: p.chamber_temper ?? prevStatus.chamberTemp,
           // Fan speeds
-          partFan: p.cooling_fan_speed,
-          auxFan: p.big_fan1_speed,
-          chamberFan: p.big_fan2_speed,
+          partFan: p.cooling_fan_speed ?? prevStatus.partFan,
+          auxFan: p.big_fan1_speed ?? prevStatus.auxFan,
+          chamberFan: p.big_fan2_speed ?? prevStatus.chamberFan,
           // Lights
-          chamberLight: p.lights_report?.find(l => l.node === 'chamber_light')?.mode === 'on',
-          workLight: p.lights_report?.find(l => l.node === 'work_light')?.mode === 'on',
-          _lightsDebug: p.lights_report, // Debug: zeigt alle verfügbaren Lichter
+          chamberLight: p.lights_report ? p.lights_report.find(l => l.node === 'chamber_light')?.mode === 'on' : prevStatus.chamberLight,
+          workLight: p.lights_report ? p.lights_report.find(l => l.node === 'work_light')?.mode === 'on' : prevStatus.workLight,
           // Speed
-          speedLevel: p.spd_lvl,
-          speedMagnitude: p.spd_mag,
+          speedLevel: p.spd_lvl ?? prevStatus.speedLevel,
+          speedMagnitude: p.spd_mag ?? prevStatus.speedMagnitude,
           // AMS
-          ams: ams,
-          externalSpool: externalSpool,
+          ams: ams || prevStatus.ams,
+          externalSpool: externalSpool || prevStatus.externalSpool,
           // Misc
-          wifiSignal: p.wifi_signal,
-          printType: p.print_type
+          wifiSignal: p.wifi_signal ?? prevStatus.wifiSignal,
+          printType: p.print_type ?? prevStatus.printType
         };
         printers.set(printer.serialNumber, { ...printers.get(printer.serialNumber), ...status });
         updatePrinters();
