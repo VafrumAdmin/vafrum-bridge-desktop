@@ -40,6 +40,14 @@ function createWindow() {
   mainWindow.webContents.on('did-finish-load', () => {
     loadConfig();
     mainWindow.webContents.send('config-loaded', config);
+
+    // Auto-Connect wenn Zugangsdaten gespeichert
+    if (config.apiUrl && config.apiKey) {
+      setTimeout(() => {
+        sendLog('Auto-Verbindung...');
+        connectToApi(config.apiUrl, config.apiKey);
+      }, 1000);
+    }
   });
 }
 
