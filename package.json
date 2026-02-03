@@ -3,10 +3,10 @@
   "version": "1.0.0",
   "description": "Vafrum Bridge Desktop - Bambu Lab Printer Manager",
   "author": "Vafrum <info@vafrum.de>",
-  "homepage": "https://github.com/vafrum/vafrum-bridge-desktop",
+  "homepage": "https://github.com/VafrumAdmin/vafrum-bridge-desktop",
   "repository": {
     "type": "git",
-    "url": "https://github.com/vafrum/vafrum-bridge-desktop.git"
+    "url": "https://github.com/VafrumAdmin/vafrum-bridge-desktop.git"
   },
   "main": "main.js",
   "scripts": {
@@ -30,7 +30,7 @@
     },
     "publish": {
       "provider": "github",
-      "owner": "vafrum",
+      "owner": "VafrumAdmin",
       "repo": "vafrum-bridge-desktop"
     },
     "files": [
