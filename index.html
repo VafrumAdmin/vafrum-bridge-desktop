@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Vafrum Bridge</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <!-- Update Banner -->
+  <div id="updateBanner" class="update-banner hidden">
+    <span id="updateText">Update verfügbar</span>
+    <div class="update-actions">
+      <span id="updateProgress" class="update-progress hidden">0%</span>
+      <button id="installUpdateBtn" class="btn btn-small btn-success hidden">Jetzt installieren</button>
+    </div>
+  </div>
+
+  <div class="app">
+    <!-- Header -->
+    <header class="header">
+      <h1>Vafrum Bridge</h1>
+      <div class="header-right">
+        <span id="appVersion" class="app-version"></span>
+        <div class="status-indicator" id="statusIndicator">
+          <span class="status-dot"></span>
+          <span class="status-text">Getrennt</span>
+        </div>
+      </div>
+    </header>
+
+    <!-- Connection Panel -->
+    <section class="panel connection-panel">
+      <h2>API Verbindung</h2>
+      <div class="form-group">
+        <label for="apiUrl">API URL</label>
+        <input type="text" id="apiUrl" placeholder="http://176.65.128.182:4000">
+      </div>
+      <div class="form-group">
+        <label for="apiKey">API Key</label>
+        <input type="password" id="apiKey" placeholder="vfk_...">
+      </div>
+      <div class="form-group">
+        <label for="tunnelUrl">Tunnel URL (ngrok)</label>
+        <input type="text" id="tunnelUrl" placeholder="https://abc123.ngrok.io">
+        <button id="saveTunnelBtn" class="btn btn-small">Speichern</button>
+      </div>
+      <div class="button-row">
+        <button id="connectBtn" class="btn btn-primary">Verbinden</button>
+        <button id="disconnectBtn" class="btn btn-secondary" disabled>Trennen</button>
+      </div>
+    </section>
+
+    <!-- Printers Panel -->
+    <section class="panel printers-panel">
+      <h2>Drucker</h2>
+      <div id="printersList" class="printers-list">
+        <div class="empty-state">Keine Drucker verbunden</div>
+      </div>
+    </section>
+
+    <!-- Log Panel -->
+    <section class="panel log-panel">
+      <h2>Log</h2>
+      <div id="logArea" class="log-area"></div>
+    </section>
+  </div>
+
+  <script src="renderer.js"></script>
+</body>
+</html>

@@ -1,0 +1,62 @@
+{
+  "name": "vafrum-bridge-desktop",
+  "version": "1.0.0",
+  "description": "Vafrum Bridge Desktop - Bambu Lab Printer Manager",
+  "author": "Vafrum <info@vafrum.de>",
+  "homepage": "https://github.com/vafrum/vafrum-bridge-desktop",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/vafrum/vafrum-bridge-desktop.git"
+  },
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "build": "electron-builder --win",
+    "build:portable": "electron-builder --win portable",
+    "release": "electron-builder --win --publish always",
+    "pack": "electron-builder --dir"
+  },
+  "build": {
+    "appId": "com.vafrum.bridge",
+    "productName": "Vafrum Bridge",
+    "win": {
+      "target": [
+        "nsis"
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    },
+    "publish": {
+      "provider": "github",
+      "owner": "vafrum",
+      "repo": "vafrum-bridge-desktop"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "index.html",
+      "renderer.js",
+      "styles.css",
+      "bridge/**/*",
+      "go2rtc.exe",
+      "cloudflared.exe"
+    ],
+    "extraResources": [
+      "go2rtc.exe",
+      "cloudflared.exe"
+    ]
+  },
+  "dependencies": {
+    "electron-updater": "^6.1.7",
+    "express": "^4.18.2",
+    "localtunnel": "^2.0.2",
+    "mqtt": "^5.15.0",
+    "socket.io-client": "^4.8.3"
+  },
+  "devDependencies": {
+    "electron": "^28.0.0",
+    "electron-builder": "^24.9.1"
+  }
+}
