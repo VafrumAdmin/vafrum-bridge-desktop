@@ -360,6 +360,15 @@ body {
   background: #f0f0f0;
 }
 
+.btn-warning {
+  background: #f59e0b;
+  color: #fff;
+}
+
+.btn-warning:hover {
+  background: #d97706;
+}
+
 .hidden {
   display: none !important;
 }

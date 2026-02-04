@@ -342,12 +342,24 @@ function executeCommand(serialNumber, command) {
       payload = { system: { sequence_id: '0', command: 'ledctrl', led_node: 'chamber_light', led_mode: cmd.on ? 'on' : 'off', led_on_time: 500, led_off_time: 500, loop_times: 0, interval_time: 0 }, user_id: '1234567890' };
       break;
     case 'workLight':
-      // H2D nutzt chamber_light2, A1/P1 nutzen work_light
-      const printer = printers.get(serialNumber);
-      const isH2D = printer?.model?.toUpperCase().includes('H2D') || printer?.model?.toUpperCase().includes('X1');
-      const workLightNode = isH2D ? 'chamber_light2' : 'work_light';
+      // A1/A1 Mini: haben nur 1 Licht (Toolhead LED) = chamber_light
+      // H2D/H2S/H2C/X1: nutzen chamber_light2 für Arbeitslicht
+      // P1S: nutzt work_light
+      const printerWL = printers.get(serialNumber);
+      sendLog('workLight - Printer data: ' + JSON.stringify(printerWL ? { model: printerWL.model, name: printerWL.name } : 'nicht gefunden'));
+      const modelUpper = printerWL?.model?.toUpperCase() || '';
+      let workLightNode = 'work_light';
+      if (modelUpper.includes('A1')) {
+        workLightNode = 'chamber_light';
+        sendLog('A1 erkannt -> chamber_light');
+      } else if (modelUpper.includes('H2D') || modelUpper.includes('H2S') || modelUpper.includes('H2C') || modelUpper.includes('X1')) {
+        workLightNode = 'chamber_light2';
+        sendLog('H2/X1 erkannt -> chamber_light2');
+      } else {
+        sendLog('Standard -> work_light');
+      }
       payload = { system: { sequence_id: '0', command: 'ledctrl', led_node: workLightNode, led_mode: cmd.on ? 'on' : 'off', led_on_time: 500, led_off_time: 500, loop_times: 0, interval_time: 0 }, user_id: '1234567890' };
-      sendLog('workLight Node: ' + workLightNode + ' für Modell: ' + (printer?.model || 'unbekannt'));
+      sendLog('LED Payload: ' + JSON.stringify(payload));
       break;
 
     // Temperature (sequence_id 2006 + user_id + \n required for gcode_line)
@@ -966,6 +978,12 @@ ipcMain.handle('check-updates', () => {
 ipcMain.handle('install-update', () => {
   sendLog('Update wird installiert, App startet neu...');
   autoUpdater.quitAndInstall(false, true);
+});
+
+ipcMain.handle('restart-app', () => {
+  sendLog('App wird neu gestartet...');
+  app.relaunch();
+  app.exit(0);
 });
 
 app.whenReady().then(() => {
