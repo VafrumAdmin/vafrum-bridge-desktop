@@ -165,7 +165,8 @@ body {
 
 /* Printers Panel */
 .printers-panel {
-  flex: 1;
+  flex: 0 0 auto;
+  max-height: 200px;
   overflow: hidden;
   display: flex;
   flex-direction: column;
@@ -294,23 +295,33 @@ body {
 
 /* Log Panel */
 .log-panel {
-  flex-shrink: 0;
-  max-height: 150px;
+  flex: 1;
+  min-height: 300px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
 
 .log-area {
-  height: 100px;
-  overflow-y: auto;
+  flex: 1;
+  overflow: auto;
   font-family: 'Consolas', 'Monaco', monospace;
-  font-size: 12px;
-  background: #1a1a1a;
+  font-size: 11px;
+  line-height: 1.4;
+  background: #0d0d0d;
   border-radius: 8px;
-  padding: 8px;
+  padding: 10px;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  word-break: break-word;
 }
 
 .log-entry {
   color: #888;
   padding: 2px 0;
+  margin: 0;
+  white-space: pre-wrap;
+  word-wrap: break-word;
 }
 
 .log-entry.error {

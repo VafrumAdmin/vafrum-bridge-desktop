@@ -115,6 +115,7 @@ function connectToApi(apiUrl, apiKey) {
   apiSocket.on('printers:list', (list) => {
     sendLog(list.length + ' Drucker empfangen');
     list.forEach(p => {
+      sendLog('Drucker von API: ' + p.name + ' | Model: ' + (p.model || 'FEHLT!') + ' | SN: ' + p.serialNumber);
       if (p.serialNumber && p.ipAddress && p.accessCode) {
         connectPrinter(p);
       }
@@ -197,13 +198,23 @@ function connectPrinter(printer) {
   client.on('message', (topic, message) => {
     try {
       const data = JSON.parse(message.toString());
+
+      // Log system responses (errors, command results)
+      if (data.system) {
+        sendLog('SYSTEM RESPONSE von ' + printer.name + ': ' + JSON.stringify(data.system));
+      }
+
       if (data.print) {
         const p = data.print;
 
-        // Debug: Log lights_report einmalig
-        if (p.lights_report && !client._lightsLogged) {
-          sendLog('LIGHTS_REPORT: ' + JSON.stringify(p.lights_report));
-          client._lightsLogged = true;
+        // Debug: Log lights_report (zeigt welche LED-Nodes der Drucker hat)
+        if (p.lights_report) {
+          const nodes = p.lights_report.map(l => l.node + '=' + l.mode).join(', ');
+          if (!client._lightsLogged || client._lastLightsNodes !== nodes) {
+            sendLog('LED-Nodes von ' + printer.name + ': ' + nodes);
+            client._lightsLogged = true;
+            client._lastLightsNodes = nodes;
+          }
         }
 
         // Parse AMS data
@@ -218,13 +229,32 @@ function connectPrinter(printer) {
           if (Array.isArray(p.ams.ams)) {
             p.ams.ams.forEach((unit, unitIdx) => {
               // Store unit-level info (humidity per AMS)
-              // humidity_raw = actual percentage, humidity = index 1-5
-              ams.units.push({
+              // humidity_raw = actual percentage (AMS 2 Pro)
+              // humidity = index 1-5 (AMS Pro 1st Gen)
+              // AMS Lite hat keinen Sensor - nicht senden!
+
+              // Prüfe ob überhaupt Feuchtigkeitsdaten vorhanden sind
+              const hasHumidityRaw = unit.humidity_raw !== undefined && unit.humidity_raw !== '';
+              const hasHumidityIndex = unit.humidity !== undefined && unit.humidity !== '' && parseInt(unit.humidity) > 0;
+
+              const unitData = {
                 id: unitIdx,
-                humidity: parseInt(unit.humidity_raw) || parseInt(unit.humidity) || 0,
-                humidityIndex: parseInt(unit.humidity) || 0,
                 temp: parseFloat(unit.temp) || 0
-              });
+              };
+
+              // Nur Feuchtigkeit senden wenn tatsächlich Daten vorhanden
+              if (hasHumidityRaw) {
+                // AMS 2 Pro: Exakte Prozentwerte
+                unitData.humidity = parseInt(unit.humidity_raw);
+                unitData.humidityIndex = parseInt(unit.humidity) || 0;
+              } else if (hasHumidityIndex) {
+                // AMS Pro 1st Gen: Nur Index 1-5
+                unitData.humidity = parseInt(unit.humidity);
+                unitData.humidityIndex = parseInt(unit.humidity);
+              }
+              // AMS Lite: Keine Feuchtigkeit (humidity bleibt undefined)
+
+              ams.units.push(unitData);
               if (Array.isArray(unit.tray)) {
                 unit.tray.forEach((tray, trayIdx) => {
                   if (tray && tray.tray_type) {
@@ -259,6 +289,36 @@ function connectPrinter(printer) {
         // Vorherigen Status holen für inkrementelle Updates
         const prevStatus = printers.get(printer.serialNumber) || {};
 
+        // H2D/H2C Dual Nozzle: extruder.info Array mit kodierten Temperaturen
+        // Format: temp = (target << 16) | current (32-bit encoded)
+        let nozzle1Temp = p.nozzle_temper ?? prevStatus.nozzleTemp ?? 0;
+        let nozzle1Target = p.nozzle_target_temper ?? prevStatus.nozzleTargetTemp ?? 0;
+        let nozzle2Temp = p.nozzle_temper_2 ?? prevStatus.nozzleTemp2;
+        let nozzle2Target = p.nozzle_target_temper_2 ?? prevStatus.nozzleTargetTemp2;
+
+        // H2D/H2C: Parse extruder.info array wenn vorhanden
+        if (p.extruder && Array.isArray(p.extruder.info) && p.extruder.info.length >= 2) {
+          const decodeTemp = (encoded) => {
+            if (!encoded || encoded === 0) return { current: 0, target: 0 };
+            const current = encoded & 0xFFFF;
+            const target = (encoded >> 16) & 0xFFFF;
+            return { current, target };
+          };
+
+          const left = decodeTemp(p.extruder.info[0]?.temp);
+          const right = decodeTemp(p.extruder.info[1]?.temp);
+
+          nozzle1Temp = left.current;
+          nozzle1Target = left.target;
+          nozzle2Temp = right.current;
+          nozzle2Target = right.target;
+
+          if (!client._extruderLogged) {
+            log(`[H2D] Dual-Düsen erkannt - Links: ${left.current}°/${left.target}° Rechts: ${right.current}°/${right.target}°`);
+            client._extruderLogged = true;
+          }
+        }
+
         const status = {
           online: true,
           gcodeState: p.gcode_state ?? prevStatus.gcodeState ?? 'IDLE',
@@ -267,10 +327,10 @@ function connectPrinter(printer) {
           currentFile: p.gcode_file || p.subtask_name || prevStatus.currentFile || '',
           layer: p.layer_num ?? prevStatus.layer ?? 0,
           totalLayers: p.total_layer_num ?? prevStatus.totalLayers ?? 0,
-          nozzleTemp: p.nozzle_temper ?? prevStatus.nozzleTemp ?? 0,
-          nozzleTargetTemp: p.nozzle_target_temper ?? prevStatus.nozzleTargetTemp ?? 0,
-          nozzleTemp2: p.nozzle_temper_2 ?? prevStatus.nozzleTemp2,
-          nozzleTargetTemp2: p.nozzle_target_temper_2 ?? prevStatus.nozzleTargetTemp2,
+          nozzleTemp: nozzle1Temp,
+          nozzleTargetTemp: nozzle1Target,
+          nozzleTemp2: nozzle2Temp,
+          nozzleTargetTemp2: nozzle2Target,
           bedTemp: p.bed_temper ?? prevStatus.bedTemp ?? 0,
           bedTargetTemp: p.bed_target_temper ?? prevStatus.bedTargetTemp ?? 0,
           chamberTemp: p.chamber_temper ?? prevStatus.chamberTemp,
@@ -278,9 +338,13 @@ function connectPrinter(printer) {
           partFan: p.cooling_fan_speed ?? prevStatus.partFan,
           auxFan: p.big_fan1_speed ?? prevStatus.auxFan,
           chamberFan: p.big_fan2_speed ?? prevStatus.chamberFan,
-          // Lights - H2D/X1 nutzen chamber_light2 für workLight, A1/P1 nutzen work_light
+          // Lights - verschiedene Drucker nutzen verschiedene Nodes
+          // A1: nur chamber_light (wird als workLight angezeigt)
+          // P1S: chamber_light + work_light
+          // X1/H2: chamber_light + chamber_light2
           chamberLight: p.lights_report ? p.lights_report.find(l => l.node === 'chamber_light')?.mode === 'on' : prevStatus.chamberLight,
           workLight: p.lights_report ? (
+            p.lights_report.find(l => l.node === 'chamber_light')?.mode === 'on' ||
             p.lights_report.find(l => l.node === 'chamber_light2')?.mode === 'on' ||
             p.lights_report.find(l => l.node === 'work_light')?.mode === 'on'
           ) : prevStatus.workLight,
@@ -344,24 +408,31 @@ function executeCommand(serialNumber, command) {
       payload = { system: { sequence_id: '0', command: 'ledctrl', led_node: 'chamber_light', led_mode: cmd.on ? 'on' : 'off', led_on_time: 500, led_off_time: 500, loop_times: 0, interval_time: 0 }, user_id: '1234567890' };
       break;
     case 'workLight':
-      // A1/A1 Mini: haben nur 1 Licht (Toolhead LED) = chamber_light
+      // A1/A1 Mini: haben nur 1 Licht (Toolhead LED) - nutzt chamber_light
       // H2D/H2S/H2C/X1: nutzen chamber_light2 für Arbeitslicht
       // P1S: nutzt work_light
       const printerWL = printers.get(serialNumber);
-      sendLog('workLight - Printer data: ' + JSON.stringify(printerWL ? { model: printerWL.model, name: printerWL.name } : 'nicht gefunden'));
-      const modelUpper = printerWL?.model?.toUpperCase() || '';
-      let workLightNode = 'work_light';
-      if (modelUpper.includes('A1')) {
-        workLightNode = 'chamber_light';
-        sendLog('A1 erkannt -> chamber_light');
-      } else if (modelUpper.includes('H2D') || modelUpper.includes('H2S') || modelUpper.includes('H2C') || modelUpper.includes('X1')) {
-        workLightNode = 'chamber_light2';
-        sendLog('H2/X1 erkannt -> chamber_light2');
+      const modelUpperWL = printerWL?.model?.toUpperCase() || '';
+      const ledModeWL = cmd.on ? 'on' : 'off';
+      sendLog('workLight für ' + (printerWL?.name || serialNumber) + ' (Model: ' + modelUpperWL + ') -> ' + ledModeWL);
+
+      if (modelUpperWL.includes('A1')) {
+        // A1/A1 Mini: Sende an BEIDE nodes - chamber_light UND work_light
+        sendLog('A1 -> sende an chamber_light UND work_light');
+        const payloadChamber = { system: { sequence_id: '0', command: 'ledctrl', led_node: 'chamber_light', led_mode: ledModeWL, led_on_time: 500, led_off_time: 500, loop_times: 0, interval_time: 0 } };
+        const payloadWork = { system: { sequence_id: '0', command: 'ledctrl', led_node: 'work_light', led_mode: ledModeWL, led_on_time: 500, led_off_time: 500, loop_times: 0, interval_time: 0 } };
+        client.publish(topic, JSON.stringify(payloadChamber));
+        sendLog('Gesendet: chamber_light');
+        client.publish(topic, JSON.stringify(payloadWork));
+        sendLog('Gesendet: work_light');
+        return;
+      } else if (modelUpperWL.includes('H2D') || modelUpperWL.includes('H2S') || modelUpperWL.includes('H2C') || modelUpperWL.includes('X1')) {
+        payload = { system: { sequence_id: '0', command: 'ledctrl', led_node: 'chamber_light2', led_mode: ledModeWL, led_on_time: 500, led_off_time: 500, loop_times: 0, interval_time: 0 } };
+        sendLog('H2/X1 -> chamber_light2');
       } else {
+        payload = { system: { sequence_id: '0', command: 'ledctrl', led_node: 'work_light', led_mode: ledModeWL, led_on_time: 500, led_off_time: 500, loop_times: 0, interval_time: 0 } };
         sendLog('Standard -> work_light');
       }
-      payload = { system: { sequence_id: '0', command: 'ledctrl', led_node: workLightNode, led_mode: cmd.on ? 'on' : 'off', led_on_time: 500, led_off_time: 500, loop_times: 0, interval_time: 0 }, user_id: '1234567890' };
-      sendLog('LED Payload: ' + JSON.stringify(payload));
       break;
 
     // Temperature (sequence_id 2006 + user_id + \n required for gcode_line)
@@ -406,8 +477,6 @@ function executeCommand(serialNumber, command) {
     case 'move':
       let dist = cmd.distance || 10;
       const axis = cmd.axis || 'X';
-      // Z-Achse invertieren (bei Bambu bedeutet Z+ Bett runter, wir wollen Z+ = Bett hoch)
-      if (axis === 'Z') dist = -dist;
       sendLog('Move Befehl: Achse=' + axis + ', Distanz=' + dist);
       // Bambu requires sequence_id 2006 for gcode, user_id, and \n at end
       payload = { print: { command: 'gcode_line', sequence_id: '2006', param: 'G91\n' }, user_id: '1234567890' };
@@ -423,8 +492,14 @@ function executeCommand(serialNumber, command) {
     default: return;
   }
 
-  client.publish(topic, JSON.stringify(payload));
-  sendLog('Befehl: ' + cmd.type);
+  sendLog('MQTT Publish an Topic: ' + topic);
+  client.publish(topic, JSON.stringify(payload), (err) => {
+    if (err) {
+      sendLog('MQTT Publish FEHLER: ' + err.message);
+    } else {
+      sendLog('MQTT Publish ERFOLG für: ' + cmd.type);
+    }
+  });
 }
 
 function updatePrinters() {
@@ -980,8 +1055,11 @@ ipcMain.handle('check-updates', () => {
 });
 
 ipcMain.handle('install-update', () => {
-  sendLog('Update wird installiert, App startet neu...');
-  autoUpdater.quitAndInstall(false, true);
+  sendLog('Update wird installiert...');
+  // isSilent=false (zeigt Installer), isForceRunAfter=true (startet App nach Install)
+  setImmediate(() => {
+    autoUpdater.quitAndInstall(false, true);
+  });
 });
 
 ipcMain.handle('restart-app', () => {
@@ -1000,6 +1078,7 @@ app.whenReady().then(() => {
   // Auto-Updater Setup
   autoUpdater.autoDownload = true;
   autoUpdater.autoInstallOnAppQuit = true;
+  let downloadedVersion = null; // Track which version is downloaded
 
   autoUpdater.on('checking-for-update', () => {
     sendLog('Suche nach Updates...');
@@ -1007,11 +1086,17 @@ app.whenReady().then(() => {
 
   autoUpdater.on('update-available', (info) => {
     sendLog('Update verfügbar: v' + info.version);
+    // Wenn bereits eine andere Version heruntergeladen wurde, diese verwerfen
+    if (downloadedVersion && downloadedVersion !== info.version) {
+      sendLog('Neue Version verfügbar - lade v' + info.version + ' (verwerfe v' + downloadedVersion + ')');
+      downloadedVersion = null;
+      if (mainWindow) mainWindow.webContents.send('update-reset'); // UI zurücksetzen
+    }
     if (mainWindow) mainWindow.webContents.send('update-available', info.version);
   });
 
   autoUpdater.on('update-not-available', () => {
-    sendLog('Keine Updates verfügbar');
+    sendLog('Bereits auf neuestem Stand');
   });
 
   autoUpdater.on('download-progress', (progress) => {
@@ -1020,19 +1105,17 @@ app.whenReady().then(() => {
   });
 
   autoUpdater.on('update-downloaded', (info) => {
-    sendLog('Update heruntergeladen und bereit: v' + info.version);
-    sendLog('Klicke auf "Jetzt installieren" um das Update zu installieren');
+    downloadedVersion = info.version;
+    sendLog('Update v' + info.version + ' bereit zur Installation');
     if (mainWindow) {
       mainWindow.webContents.send('update-downloaded', info.version);
-      // Nochmal nach kurzer Verzögerung senden falls UI nicht bereit war
-      setTimeout(() => {
-        mainWindow.webContents.send('update-downloaded', info.version);
-      }, 1000);
     }
   });
 
   autoUpdater.on('error', (err) => {
     sendLog('Update Fehler: ' + err.message);
+    downloadedVersion = null;
+    if (mainWindow) mainWindow.webContents.send('update-reset');
   });
 
   // Nach 5 Sekunden nach Updates suchen

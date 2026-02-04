@@ -265,5 +265,15 @@ installUpdateBtn.addEventListener('click', () => {
   window.bridge.installUpdate();
 });
 
+// Reset UI wenn neue Version verfügbar (alte verwerfen)
+window.bridge.onUpdateReset(() => {
+  addLog('Neues Update verfügbar - UI wird zurückgesetzt');
+  installUpdateBtn.classList.add('hidden');
+  installUpdateBtn.style.display = 'none';
+  updateProgress.classList.remove('hidden');
+  updateProgress.style.display = '';
+  updateProgress.textContent = 'Wird heruntergeladen...';
+});
+
 // Initialize
 addLog('Vafrum Bridge gestartet');

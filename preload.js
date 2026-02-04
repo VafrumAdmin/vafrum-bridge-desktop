@@ -20,5 +20,6 @@ contextBridge.exposeInMainWorld('bridge', {
   // Update-Events
   onUpdateAvailable: (callback) => ipcRenderer.on('update-available', (event, version) => callback(version)),
   onUpdateProgress: (callback) => ipcRenderer.on('update-progress', (event, percent) => callback(percent)),
-  onUpdateDownloaded: (callback) => ipcRenderer.on('update-downloaded', (event, version) => callback(version))
+  onUpdateDownloaded: (callback) => ipcRenderer.on('update-downloaded', (event, version) => callback(version)),
+  onUpdateReset: (callback) => ipcRenderer.on('update-reset', () => callback())
 });
