@@ -225,6 +225,13 @@ const updateText = document.getElementById('updateText');
 const updateProgress = document.getElementById('updateProgress');
 const installUpdateBtn = document.getElementById('installUpdateBtn');
 const checkUpdateBtn = document.getElementById('checkUpdateBtn');
+const restartBtn = document.getElementById('restartBtn');
+
+// Restart Button
+restartBtn.addEventListener('click', () => {
+  addLog('App wird neu gestartet...');
+  window.bridge.restart();
+});
 
 // Manual update check
 checkUpdateBtn.addEventListener('click', () => {

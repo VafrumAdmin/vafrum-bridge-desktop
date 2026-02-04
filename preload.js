@@ -10,6 +10,7 @@ contextBridge.exposeInMainWorld('bridge', {
   // Update-Funktionen
   checkUpdates: () => ipcRenderer.invoke('check-updates'),
   installUpdate: () => ipcRenderer.invoke('install-update'),
+  restart: () => ipcRenderer.invoke('restart-app'),
 
   onLog: (callback) => ipcRenderer.on('log', (event, msg) => callback(msg)),
   onApiStatus: (callback) => ipcRenderer.on('api-status', (event, status) => callback(status)),
