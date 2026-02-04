@@ -600,16 +600,21 @@ function connectJpegStream(serial, accessCode, ip, streamData) {
   });
 
   socket.on('data', (data) => {
+    if (!streamData.receivedData) {
+      sendLog('Erste Daten empfangen von ' + serial + ': ' + data.length + ' bytes');
+      sendLog('Erste 20 bytes: ' + data.slice(0, 20).toString('hex'));
+      streamData.receivedData = true;
+    }
     streamData.buffer = Buffer.concat([streamData.buffer, data]);
     processJpegBuffer(serial, streamData);
   });
 
   socket.on('error', (err) => {
-    sendLog('JPEG Stream Fehler (' + serial + '): ' + err.message);
+    sendLog('JPEG Stream Fehler (' + serial + '): ' + err.message + ' (Code: ' + err.code + ')');
   });
 
-  socket.on('close', () => {
-    sendLog('JPEG Stream geschlossen: ' + serial);
+  socket.on('close', (hadError) => {
+    sendLog('JPEG Stream geschlossen: ' + serial + ' (Fehler: ' + hadError + ', Daten empfangen: ' + !!streamData.receivedData + ')');
     streamData.socket = null;
 
     // Reconnect nach 5 Sekunden
