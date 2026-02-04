@@ -339,7 +339,12 @@ function executeCommand(serialNumber, command) {
       payload = { system: { sequence_id: '0', command: 'ledctrl', led_node: 'chamber_light', led_mode: cmd.on ? 'on' : 'off', led_on_time: 500, led_off_time: 500, loop_times: 0, interval_time: 0 }, user_id: '1234567890' };
       break;
     case 'workLight':
-      payload = { system: { sequence_id: '0', command: 'ledctrl', led_node: 'work_light', led_mode: cmd.on ? 'on' : 'off', led_on_time: 500, led_off_time: 500, loop_times: 0, interval_time: 0 }, user_id: '1234567890' };
+      // H2D nutzt chamber_light2, A1/P1 nutzen work_light
+      const printer = printers.get(serialNumber);
+      const isH2D = printer?.model?.toUpperCase().includes('H2D') || printer?.model?.toUpperCase().includes('X1');
+      const workLightNode = isH2D ? 'chamber_light2' : 'work_light';
+      payload = { system: { sequence_id: '0', command: 'ledctrl', led_node: workLightNode, led_mode: cmd.on ? 'on' : 'off', led_on_time: 500, led_off_time: 500, loop_times: 0, interval_time: 0 }, user_id: '1234567890' };
+      sendLog('workLight Node: ' + workLightNode + ' für Modell: ' + (printer?.model || 'unbekannt'));
       break;
 
     // Temperature (sequence_id 2006 + user_id + \n required for gcode_line)
