@@ -576,26 +576,27 @@ function connectJpegStream(serial, accessCode, ip, streamData) {
   const options = {
     host: ip,
     port: 6000,
-    rejectUnauthorized: false,
-    timeout: 10000
+    rejectUnauthorized: false
   };
 
   const socket = tls.connect(options, () => {
     sendLog('TLS verbunden: ' + serial);
     streamData.reconnectAttempts = 0;
 
-    // Auth-Paket senden (96 bytes)
-    const authPacket = Buffer.alloc(96);
-    authPacket.writeUInt32LE(0x40, 0);       // Magic
-    authPacket.writeUInt32LE(0x3000, 4);     // Magic
-    // Bytes 8-15: zeros (already 0)
-    // Username "bblp" at offset 16
+    // Auth-Paket senden (80 bytes)
+    // Format: 4 bytes 0x40 + 4 bytes 0x3000 + 4 bytes 0 + 4 bytes 0 + 32 bytes username + 32 bytes accesscode
+    const authPacket = Buffer.alloc(80);
+    authPacket.writeUInt32LE(0x40, 0);       // Header marker
+    authPacket.writeUInt32LE(0x3000, 4);     // Protocol identifier
+    authPacket.writeUInt32LE(0, 8);          // Reserved
+    authPacket.writeUInt32LE(0, 12);         // Reserved
+    // Username "bblp" at offset 16 (32 bytes field)
     Buffer.from('bblp').copy(authPacket, 16);
-    // Access code at offset 48
+    // Access code at offset 48 (32 bytes field)
     Buffer.from(accessCode).copy(authPacket, 48);
 
     socket.write(authPacket);
-    sendLog('Auth gesendet: ' + serial);
+    sendLog('Auth gesendet (80 bytes): ' + serial);
   });
 
   socket.on('data', (data) => {
@@ -623,46 +624,51 @@ function connectJpegStream(serial, accessCode, ip, streamData) {
     }
   });
 
-  socket.on('timeout', () => {
-    sendLog('JPEG Stream Timeout: ' + serial);
-    socket.destroy();
-  });
-
   streamData.socket = socket;
 }
 
 function processJpegBuffer(serial, streamData) {
-  // Frame Format: 16 byte header + JPEG data
-  // Header: bytes 0-3 = payload size (little-endian)
+  // Suche nach JPEG-Frames direkt über Marker
+  // JPEG Start: FF D8 FF E0 (oder FF D8 FF E1 für EXIF)
+  // JPEG Ende: FF D9
 
-  while (streamData.buffer.length >= 16) {
-    const payloadSize = streamData.buffer.readUInt32LE(0);
+  const JPEG_START = Buffer.from([0xFF, 0xD8]);
+  const JPEG_END = Buffer.from([0xFF, 0xD9]);
 
-    if (payloadSize === 0 || payloadSize > 10000000) {
-      // Ungültiger Header, versuche zu resynchronisieren
-      const jpegStart = streamData.buffer.indexOf(Buffer.from([0xFF, 0xD8, 0xFF]));
-      if (jpegStart > 0) {
-        streamData.buffer = streamData.buffer.slice(jpegStart);
-      } else if (jpegStart === -1) {
-        streamData.buffer = Buffer.alloc(0);
-      }
+  while (true) {
+    // Suche Start-Marker
+    const startIdx = streamData.buffer.indexOf(JPEG_START);
+    if (startIdx === -1) {
+      // Kein Start gefunden, Buffer leeren
+      streamData.buffer = Buffer.alloc(0);
       return;
     }
 
-    const totalSize = 16 + payloadSize;
+    // Wenn Start nicht am Anfang, davor liegende Daten entfernen
+    if (startIdx > 0) {
+      streamData.buffer = streamData.buffer.slice(startIdx);
+    }
 
-    if (streamData.buffer.length < totalSize) {
-      // Noch nicht genug Daten
+    // Suche End-Marker (nach dem Start)
+    const endIdx = streamData.buffer.indexOf(JPEG_END, 2);
+    if (endIdx === -1) {
+      // Noch kein Ende gefunden, warten auf mehr Daten
       return;
     }
 
-    // JPEG extrahieren
-    const jpegData = streamData.buffer.slice(16, totalSize);
-    streamData.buffer = streamData.buffer.slice(totalSize);
+    // Komplettes JPEG extrahieren (inklusive End-Marker)
+    const jpegData = streamData.buffer.slice(0, endIdx + 2);
+    streamData.buffer = streamData.buffer.slice(endIdx + 2);
 
-    // Validieren (JPEG startet mit FFD8FF)
-    if (jpegData.length > 3 && jpegData[0] === 0xFF && jpegData[1] === 0xD8 && jpegData[2] === 0xFF) {
+    // Validieren und speichern
+    if (jpegData.length > 100) { // Mindestgröße für gültiges JPEG
       streamData.lastFrame = jpegData;
+      streamData.frameCount = (streamData.frameCount || 0) + 1;
+
+      // Nur alle 10 Frames loggen um Spam zu vermeiden
+      if (streamData.frameCount % 10 === 1) {
+        sendLog('Frame empfangen: ' + serial + ' (' + jpegData.length + ' bytes)');
+      }
 
       // An alle verbundenen Clients senden
       streamData.clients.forEach(client => {
