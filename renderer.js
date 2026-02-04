@@ -224,6 +224,19 @@ const updateBanner = document.getElementById('updateBanner');
 const updateText = document.getElementById('updateText');
 const updateProgress = document.getElementById('updateProgress');
 const installUpdateBtn = document.getElementById('installUpdateBtn');
+const checkUpdateBtn = document.getElementById('checkUpdateBtn');
+
+// Manual update check
+checkUpdateBtn.addEventListener('click', () => {
+  addLog('Suche nach Updates...');
+  checkUpdateBtn.disabled = true;
+  checkUpdateBtn.textContent = 'Prüfe...';
+  window.bridge.checkUpdates();
+  setTimeout(() => {
+    checkUpdateBtn.disabled = false;
+    checkUpdateBtn.textContent = 'Updates prüfen';
+  }, 5000);
+});
 
 // Update Events
 window.bridge.onUpdateAvailable((version) => {
