@@ -788,9 +788,17 @@ function startTunnel() {
       }
       // Update camera URLs - alles geht über go2rtc
       printers.forEach((printer, serial) => {
-        if (cameraUrls.has(serial)) {
-          const mjpegUrl = config.tunnelUrl + '/api/stream.mjpeg?src=cam_' + serial;
-          cameraUrls.set(serial, mjpegUrl);
+        const mjpegUrl = config.tunnelUrl + '/api/stream.mjpeg?src=cam_' + serial;
+        cameraUrls.set(serial, mjpegUrl);
+        sendLog('URL aktualisiert: ' + serial + ' -> ' + mjpegUrl);
+
+        // Status mit neuer URL an API senden
+        if (apiSocket?.connected) {
+          apiSocket.emit('printer:status', {
+            printerId: printer.id,
+            serialNumber: serial,
+            cameraUrl: mjpegUrl
+          });
         }
       });
     }
