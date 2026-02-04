@@ -87,7 +87,7 @@ function connectToApi(apiUrl, apiKey) {
   if (apiSocket) apiSocket.disconnect();
 
   sendLog('Verbinde mit API...');
-  mainWindow.webContents.send('api-status', 'connecting');
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('api-status', 'connecting');
 
   apiSocket = io(apiUrl, {
     path: '/socket.io',
@@ -99,7 +99,7 @@ function connectToApi(apiUrl, apiKey) {
 
   apiSocket.on('connect', () => {
     sendLog('API verbunden');
-    mainWindow.webContents.send('api-status', 'connected');
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('api-status', 'connected');
   });
 
   apiSocket.on('authenticated', () => {
@@ -109,7 +109,7 @@ function connectToApi(apiUrl, apiKey) {
 
   apiSocket.on('auth:error', (error) => {
     sendLog('Auth Fehler: ' + error);
-    mainWindow.webContents.send('api-status', 'error');
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('api-status', 'error');
   });
 
   apiSocket.on('printers:list', (list) => {
@@ -151,7 +151,7 @@ function connectToApi(apiUrl, apiKey) {
 
   apiSocket.on('disconnect', () => {
     sendLog('API getrennt');
-    mainWindow.webContents.send('api-status', 'disconnected');
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('api-status', 'disconnected');
   });
 }
 
@@ -163,8 +163,10 @@ function disconnectApi() {
   mqttClients.forEach(c => c.end());
   mqttClients.clear();
   printers.clear();
-  mainWindow.webContents.send('api-status', 'disconnected');
-  mainWindow.webContents.send('printers-update', []);
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('api-status', 'disconnected');
+    mainWindow.webContents.send('printers-update', []);
+  }
 }
 
 function connectPrinter(printer) {
@@ -426,7 +428,9 @@ function executeCommand(serialNumber, command) {
 }
 
 function updatePrinters() {
-  mainWindow.webContents.send('printers-update', Array.from(printers.values()));
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('printers-update', Array.from(printers.values()));
+  }
 }
 
 ipcMain.handle('connect', (e, { apiUrl, apiKey }) => {
