@@ -336,12 +336,10 @@ function executeCommand(serialNumber, command) {
     // Lights
     case 'chamberLight':
     case 'light':
-      payload = { system: { sequence_id: '0', command: 'ledctrl', led_node: 'chamber_light', led_mode: cmd.on ? 'on' : 'off', led_on_time: 500, led_off_time: 500, loop_times: 0, interval_time: 0 } };
-      sendLog('chamberLight Payload: ' + JSON.stringify(payload));
+      payload = { system: { sequence_id: '0', command: 'ledctrl', led_node: 'chamber_light', led_mode: cmd.on ? 'on' : 'off', led_on_time: 500, led_off_time: 500, loop_times: 0, interval_time: 0 }, user_id: '1234567890' };
       break;
     case 'workLight':
-      payload = { system: { sequence_id: '0', command: 'ledctrl', led_node: 'work_light', led_mode: cmd.on ? 'on' : 'off', led_on_time: 500, led_off_time: 500, loop_times: 1, interval_time: 1000 } };
-      sendLog('workLight Payload: ' + JSON.stringify(payload));
+      payload = { system: { sequence_id: '0', command: 'ledctrl', led_node: 'work_light', led_mode: cmd.on ? 'on' : 'off', led_on_time: 500, led_off_time: 500, loop_times: 0, interval_time: 0 }, user_id: '1234567890' };
       break;
 
     // Temperature (sequence_id 2006 + user_id + \n required for gcode_line)
