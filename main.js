@@ -1016,8 +1016,15 @@ app.whenReady().then(() => {
   });
 
   autoUpdater.on('update-downloaded', (info) => {
-    sendLog('Update heruntergeladen: v' + info.version);
-    if (mainWindow) mainWindow.webContents.send('update-downloaded', info.version);
+    sendLog('Update heruntergeladen und bereit: v' + info.version);
+    sendLog('Klicke auf "Jetzt installieren" um das Update zu installieren');
+    if (mainWindow) {
+      mainWindow.webContents.send('update-downloaded', info.version);
+      // Nochmal nach kurzer Verzögerung senden falls UI nicht bereit war
+      setTimeout(() => {
+        mainWindow.webContents.send('update-downloaded', info.version);
+      }, 1000);
+    }
   });
 
   autoUpdater.on('error', (err) => {
@@ -1028,6 +1035,12 @@ app.whenReady().then(() => {
   setTimeout(() => {
     autoUpdater.checkForUpdates().catch(e => sendLog('Update-Check fehlgeschlagen: ' + e.message));
   }, 5000);
+
+  // Alle 5 Minuten automatisch nach Updates suchen
+  setInterval(() => {
+    sendLog('Automatischer Update-Check...');
+    autoUpdater.checkForUpdates().catch(e => sendLog('Auto-Update-Check fehlgeschlagen: ' + e.message));
+  }, 5 * 60 * 1000);
 });
 
 app.on('window-all-closed', () => {

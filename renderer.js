@@ -236,13 +236,7 @@ restartBtn.addEventListener('click', () => {
 // Manual update check
 checkUpdateBtn.addEventListener('click', () => {
   addLog('Suche nach Updates...');
-  checkUpdateBtn.disabled = true;
-  checkUpdateBtn.textContent = 'Prüfe...';
   window.bridge.checkUpdates();
-  setTimeout(() => {
-    checkUpdateBtn.disabled = false;
-    checkUpdateBtn.textContent = 'Updates prüfen';
-  }, 5000);
 });
 
 // Update Events
@@ -258,9 +252,13 @@ window.bridge.onUpdateProgress((percent) => {
 });
 
 window.bridge.onUpdateDownloaded((version) => {
+  addLog('Update heruntergeladen: v' + version + ' - Installieren-Button sollte erscheinen');
   updateText.textContent = 'Update bereit: v' + version;
   updateProgress.classList.add('hidden');
+  updateProgress.style.display = 'none';
   installUpdateBtn.classList.remove('hidden');
+  installUpdateBtn.style.display = 'inline-block';
+  addLog('installUpdateBtn display: ' + installUpdateBtn.style.display + ', classList: ' + installUpdateBtn.className);
 });
 
 installUpdateBtn.addEventListener('click', () => {
