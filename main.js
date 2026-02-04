@@ -276,9 +276,12 @@ function connectPrinter(printer) {
           partFan: p.cooling_fan_speed ?? prevStatus.partFan,
           auxFan: p.big_fan1_speed ?? prevStatus.auxFan,
           chamberFan: p.big_fan2_speed ?? prevStatus.chamberFan,
-          // Lights
+          // Lights - H2D/X1 nutzen chamber_light2 für workLight, A1/P1 nutzen work_light
           chamberLight: p.lights_report ? p.lights_report.find(l => l.node === 'chamber_light')?.mode === 'on' : prevStatus.chamberLight,
-          workLight: p.lights_report ? p.lights_report.find(l => l.node === 'work_light')?.mode === 'on' : prevStatus.workLight,
+          workLight: p.lights_report ? (
+            p.lights_report.find(l => l.node === 'chamber_light2')?.mode === 'on' ||
+            p.lights_report.find(l => l.node === 'work_light')?.mode === 'on'
+          ) : prevStatus.workLight,
           // Speed
           speedLevel: p.spd_lvl ?? prevStatus.speedLevel,
           speedMagnitude: p.spd_mag ?? prevStatus.speedMagnitude,
