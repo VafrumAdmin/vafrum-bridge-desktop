@@ -337,13 +337,13 @@ function connectPrinter(printer) {
         let nozzle2Target = p.nozzle_target_temper_2 ?? prevStatus.nozzleTargetTemp2;
 
         // H2D/H2C: Parse extruder.info array wenn vorhanden
-        // Debug: Log ALL print data for H2D to find nozzle2 field
+        // Debug: Log H2D specific fields
         const printerInfo = printers.get(printer.serialNumber);
         if (printerInfo?.model?.toUpperCase()?.includes('H2')) {
-          const keys = Object.keys(p).join(', ');
-          sendLog('H2D KEYS: ' + keys);
-          if (p.nozzle_temper_2 !== undefined) sendLog('H2D nozzle_temper_2: ' + p.nozzle_temper_2);
-          if (p.extruder) sendLog('H2D EXTRUDER: ' + JSON.stringify(p.extruder).substring(0, 500));
+          if (p.aux !== undefined) sendLog('H2D AUX: ' + JSON.stringify(p.aux));
+          if (p.info !== undefined) sendLog('H2D INFO: ' + JSON.stringify(p.info));
+          if (p['2D'] !== undefined) sendLog('H2D 2D: ' + JSON.stringify(p['2D']));
+          if (p['3D'] !== undefined) sendLog('H2D 3D: ' + JSON.stringify(p['3D']));
         }
         if (p.extruder && Array.isArray(p.extruder.info) && p.extruder.info.length >= 2) {
           const decodeTemp = (encoded) => {
