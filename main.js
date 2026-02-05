@@ -337,6 +337,10 @@ function connectPrinter(printer) {
         let nozzle2Target = p.nozzle_target_temper_2 ?? prevStatus.nozzleTargetTemp2;
 
         // H2D/H2C: Parse extruder.info array wenn vorhanden
+        // Debug: Log extruder data for H2D
+        if (p.extruder) {
+          sendLog('EXTRUDER DATA: ' + JSON.stringify(p.extruder).substring(0, 500));
+        }
         if (p.extruder && Array.isArray(p.extruder.info) && p.extruder.info.length >= 2) {
           const decodeTemp = (encoded) => {
             if (!encoded || encoded === 0) return { current: 0, target: 0 };
