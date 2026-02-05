@@ -336,15 +336,13 @@ function connectPrinter(printer) {
         let nozzle2Temp = p.nozzle_temper_2 ?? prevStatus.nozzleTemp2;
         let nozzle2Target = p.nozzle_target_temper_2 ?? prevStatus.nozzleTargetTemp2;
 
-        // H2D/H2C: Parse extruder.info array wenn vorhanden
-        // Debug: Log H2D specific fields
-        const printerInfo = printers.get(printer.serialNumber);
-        if (printerInfo?.model?.toUpperCase()?.includes('H2')) {
-          if (p.aux !== undefined) sendLog('H2D AUX: ' + JSON.stringify(p.aux));
-          if (p.info !== undefined) sendLog('H2D INFO: ' + JSON.stringify(p.info));
-          if (p['2D'] !== undefined) sendLog('H2D 2D: ' + JSON.stringify(p['2D']));
-          if (p['3D'] !== undefined) sendLog('H2D 3D: ' + JSON.stringify(p['3D']));
+        // H2D/H2C: Parse second nozzle from info.temp field
+        const printerInfoH2 = printers.get(printer.serialNumber);
+        if (printerInfoH2?.model?.toUpperCase()?.includes('H2') && p.info?.temp !== undefined) {
+          nozzle2Temp = p.info.temp;
+          nozzle2Target = 0; // H2D doesn't seem to send target for second nozzle
         }
+        // Fallback: Parse extruder.info array wenn vorhanden (other dual-nozzle models)
         if (p.extruder && Array.isArray(p.extruder.info) && p.extruder.info.length >= 2) {
           const decodeTemp = (encoded) => {
             if (!encoded || encoded === 0) return { current: 0, target: 0 };
