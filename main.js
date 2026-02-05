@@ -17,6 +17,8 @@ let printers = new Map();
 let config = { apiUrl: '', apiKey: '', tunnelUrl: '' };
 let configPath = '';
 let go2rtcProcess = null;
+let logsDir = '';
+let rawMqttLogStream = null;
 let go2rtcReady = false;
 let cameraUrls = new Map();
 let cameraStreams = new Map(); // Alle Kamera-Streams für go2rtc
@@ -65,6 +67,41 @@ function loadConfig() {
     }
   } catch (e) {
     console.error('Config error:', e);
+  }
+}
+
+// === Debug Logging für Entwicklung ===
+function initLogging() {
+  logsDir = path.join(app.getPath('userData'), 'logs');
+  if (!fs.existsSync(logsDir)) {
+    fs.mkdirSync(logsDir, { recursive: true });
+  }
+
+  // Raw MQTT Log Stream (append mode)
+  const rawLogPath = path.join(logsDir, 'mqtt-raw.log');
+  rawMqttLogStream = fs.createWriteStream(rawLogPath, { flags: 'a' });
+  sendLog('Logging initialisiert: ' + logsDir);
+}
+
+function logRawMqtt(serialNumber, topic, data) {
+  if (!rawMqttLogStream) return;
+  const timestamp = new Date().toISOString();
+  const entry = `[${timestamp}] [${serialNumber}] ${topic}\n${JSON.stringify(data, null, 2)}\n${'='.repeat(80)}\n`;
+  rawMqttLogStream.write(entry);
+}
+
+function logLatestStatus() {
+  if (!logsDir) return;
+  const statusObj = {};
+  printers.forEach((printer, serial) => {
+    statusObj[serial] = printer;
+  });
+
+  try {
+    const statusPath = path.join(logsDir, 'latest-status.json');
+    fs.writeFileSync(statusPath, JSON.stringify(statusObj, null, 2));
+  } catch (e) {
+    // Ignore write errors
   }
 }
 
@@ -198,6 +235,9 @@ function connectPrinter(printer) {
   client.on('message', (topic, message) => {
     try {
       const data = JSON.parse(message.toString());
+
+      // Debug: Raw MQTT data to file
+      logRawMqtt(printer.serialNumber, topic, data);
 
       // Log system responses (errors, command results)
       if (data.system) {
@@ -360,6 +400,7 @@ function connectPrinter(printer) {
         };
         printers.set(printer.serialNumber, { ...printers.get(printer.serialNumber), ...status });
         updatePrinters();
+        logLatestStatus(); // Debug: Write current status to file
 
         if (apiSocket?.connected) {
           apiSocket.emit('printer:status', {
@@ -1071,6 +1112,7 @@ ipcMain.handle('restart-app', () => {
 app.whenReady().then(() => {
   configPath = path.join(app.getPath('userData'), 'config.json');
   localIp = getLocalIp();
+  initLogging();      // Debug Logging initialisieren
   startMjpegServer(); // MJPEG Server für A1/P1
   startGo2rtc();      // go2rtc für X1/H2D
   createWindow();
@@ -1131,6 +1173,11 @@ app.whenReady().then(() => {
 });
 
 app.on('window-all-closed', () => {
+  // Log Stream schließen
+  if (rawMqttLogStream) {
+    rawMqttLogStream.end();
+    rawMqttLogStream = null;
+  }
   // JPEG Streams stoppen
   jpegStreams.forEach((stream, serial) => {
     stopJpegStream(serial);
