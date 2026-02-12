@@ -362,9 +362,16 @@ function connectPrinter(printer) {
                       type: tray.tray_type || '',
                       color: tray.tray_color || '',
                       name: tray.tray_sub_brands || tray.tray_type || '',
-                      remain: tray.remain || 0,
+                      remain: tray.remain != null ? parseInt(tray.remain) : -1,
                       k: tray.k || 0,
-                      temp: tray.nozzle_temp_min ? `${tray.nozzle_temp_min}-${tray.nozzle_temp_max}` : ''
+                      nozzleTempMin: tray.nozzle_temp_min || 0,
+                      nozzleTempMax: tray.nozzle_temp_max || 0,
+                      trayInfoIdx: tray.tray_info_idx || '',
+                      tagUid: tray.tag_uid || '',
+                      trayUuid: tray.tray_uuid || '',
+                      trayWeight: tray.tray_weight ? parseInt(tray.tray_weight) : 0,
+                      dryingTemp: tray.drying_temp ? parseInt(tray.drying_temp) : 0,
+                      dryingTime: tray.drying_time ? parseInt(tray.drying_time) : 0
                     });
                   }
                 });
@@ -375,14 +382,29 @@ function connectPrinter(printer) {
 
         // Parse external spool: vt_tray (Standard) oder vir_slot (H2D Dual-Nozzle)
         let externalSpool = null;
+        let externalSpools = []; // Für H2D: mehrere externe Spulen
         if (Array.isArray(p.vir_slot) && p.vir_slot.length > 0) {
           // H2D/H2C: vir_slot Array – id 254 = Nozzle 0 (links), id 253 = Nozzle 1 (rechts)
-          const slot = p.vir_slot.find(s => s.id === '254' || s.id === 254) || p.vir_slot[0];
-          if (slot) {
+          for (const slot of p.vir_slot) {
             const vtType = slot.tray_type || '';
             const vtColor = slot.tray_color || '';
             if (vtType || (vtColor && vtColor !== '00000000')) {
-              externalSpool = { type: vtType, color: vtColor, name: slot.tray_sub_brands || '' };
+              const spoolData = {
+                id: slot.id != null ? parseInt(slot.id) : 254,
+                type: vtType,
+                color: vtColor,
+                name: slot.tray_sub_brands || '',
+                remain: slot.remain != null ? parseInt(slot.remain) : -1,
+                k: slot.k || 0,
+                nozzleTempMin: slot.nozzle_temp_min || 0,
+                nozzleTempMax: slot.nozzle_temp_max || 0,
+                trayInfoIdx: slot.tray_info_idx || '',
+                tagUid: slot.tag_uid || '',
+                trayWeight: slot.tray_weight ? parseInt(slot.tray_weight) : 0
+              };
+              externalSpools.push(spoolData);
+              // Rückwärtskompatibel: erste Spule als externalSpool
+              if (!externalSpool) externalSpool = spoolData;
             }
           }
         } else if (p.vt_tray) {
@@ -390,7 +412,19 @@ function connectPrinter(printer) {
           const vtType = p.vt_tray.tray_type || '';
           const vtColor = p.vt_tray.tray_color || '';
           if (vtType || (vtColor && vtColor !== '00000000')) {
-            externalSpool = { type: vtType, color: vtColor, name: p.vt_tray.tray_sub_brands || '' };
+            externalSpool = {
+              type: vtType,
+              color: vtColor,
+              name: p.vt_tray.tray_sub_brands || '',
+              remain: p.vt_tray.remain != null ? parseInt(p.vt_tray.remain) : -1,
+              k: p.vt_tray.k || 0,
+              nozzleTempMin: p.vt_tray.nozzle_temp_min || 0,
+              nozzleTempMax: p.vt_tray.nozzle_temp_max || 0,
+              trayInfoIdx: p.vt_tray.tray_info_idx || '',
+              tagUid: p.vt_tray.tag_uid || '',
+              trayWeight: p.vt_tray.tray_weight ? parseInt(p.vt_tray.tray_weight) : 0
+            };
+            externalSpools = [externalSpool];
           }
         }
 
@@ -467,6 +501,7 @@ function connectPrinter(printer) {
           // AMS
           ams: ams || prevStatus.ams,
           externalSpool: externalSpool || prevStatus.externalSpool,
+          externalSpools: externalSpools.length > 0 ? externalSpools : prevStatus.externalSpools,
           // Misc
           wifiSignal: p.wifi_signal ?? prevStatus.wifiSignal,
           printType: p.print_type ?? prevStatus.printType
