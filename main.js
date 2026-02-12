@@ -1080,6 +1080,22 @@ function startGo2rtc() {
 
   // Config in userData schreiben (dort haben wir Schreibrechte)
   const configFile = path.join(app.getPath('userData'), 'go2rtc.yaml');
+  // Custom www-Ordner mit eigenem stream.html (ohne controls, volle Breite)
+  const wwwDir = path.join(app.getPath('userData'), 'www');
+  if (!fs.existsSync(wwwDir)) fs.mkdirSync(wwwDir, { recursive: true });
+  fs.writeFileSync(path.join(wwwDir, 'stream.html'), `<!DOCTYPE html>
+<html><head><style>
+*{margin:0;padding:0}html,body{width:100%;height:100%;overflow:hidden;background:#000;display:flex}
+video-stream{display:block;width:100%;height:100%;flex:1}
+</style><script type="module" src="video-stream.js"></script></head><body>
+<script type="module">
+import {VideoStream} from './video-stream.js';
+const p=new URLSearchParams(location.search);
+const src=p.get('src');if(src){
+const v=document.createElement('video-stream');
+v.src=new URL('api/ws?src='+src,location.href);
+document.body.appendChild(v);}
+</script></body></html>`);
   fs.writeFileSync(configFile, 'api:\n  listen: "127.0.0.1:1984"\nrtsp:\n  listen: ""\nstreams: {}\n');
 
   go2rtcProcess = spawn(go2rtcPath, ['-c', configFile], { stdio: 'ignore', windowsHide: true });
