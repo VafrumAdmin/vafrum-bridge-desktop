@@ -1117,7 +1117,7 @@ if(src){
 </body></html>`);
   fs.writeFileSync(configFile, 'api:\n  listen: "127.0.0.1:1984"\n  static_dir: "' + wwwDir.replace(/\\/g, '/') + '"\nrtsp:\n  listen: ""\nstreams: {}\n');
 
-  go2rtcProcess = spawn(go2rtcPath, ['-c', configFile], { stdio: 'ignore', windowsHide: true });
+  go2rtcProcess = spawn(go2rtcPath, ['-c', configFile], { stdio: 'ignore', windowsHide: true, cwd: app.getPath('userData') });
   go2rtcProcess.on('error', (e) => sendLog('go2rtc Fehler: ' + e.message));
 
   // Watchdog: go2rtc bei Crash automatisch neu starten
@@ -1342,7 +1342,7 @@ function startGo2rtcWithConfig(configPath) {
 
   if (!go2rtcPath) return;
 
-  go2rtcProcess = spawn(go2rtcPath, ['-c', configPath], { stdio: 'pipe', windowsHide: true });
+  go2rtcProcess = spawn(go2rtcPath, ['-c', configPath], { stdio: 'pipe', windowsHide: true, cwd: app.getPath('userData') });
   go2rtcProcess.stdout.on('data', (data) => {
     const msg = data.toString().trim();
     if (msg) sendLog('go2rtc: ' + msg.substring(0, 200));
