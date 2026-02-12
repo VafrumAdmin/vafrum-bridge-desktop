@@ -25,6 +25,14 @@ let cameraStreams = new Map(); // Alle Kamera-Streams für go2rtc
 let go2rtcRestartTimer = null; // Debounce für go2rtc Neustart
 let localIp = 'localhost';
 
+// === Auto-Reconnect & Resilience ===
+let tunnelRestartAttempts = 0;
+let tunnelRestartTimer = null;
+let go2rtcWatchdogTimer = null;
+let mqttErrorThrottle = new Map(); // serial -> lastLogTime (Fehler-Spam vermeiden)
+let printerReconnectTimers = new Map(); // serial -> timer (Reconnect-Timer pro Drucker)
+let printerDataCache = new Map(); // serial -> printer data (für Reconnect nach Verlust)
+
 // JPEG Streaming für A1/P1 Drucker
 let jpegStreams = new Map(); // serial -> { socket, lastFrame, clients }
 let mjpegServer = null;
@@ -130,7 +138,10 @@ function connectToApi(apiUrl, apiKey) {
     path: '/socket.io',
     transports: ['websocket', 'polling'],
     reconnection: true,
-    reconnectionDelay: 5000,
+    reconnectionDelay: 3000,
+    reconnectionDelayMax: 30000,
+    reconnectionAttempts: Infinity,
+    timeout: 20000,
     auth: { apiKey }
   });
 
@@ -210,6 +221,15 @@ function disconnectApi() {
 function connectPrinter(printer) {
   if (mqttClients.has(printer.serialNumber)) return;
 
+  // Druckerdaten cachen für späteres Reconnect
+  printerDataCache.set(printer.serialNumber, printer);
+
+  // Eventuellen alten Reconnect-Timer löschen
+  if (printerReconnectTimers.has(printer.serialNumber)) {
+    clearTimeout(printerReconnectTimers.get(printer.serialNumber));
+    printerReconnectTimers.delete(printer.serialNumber);
+  }
+
   sendLog('Verbinde: ' + printer.name);
 
   const client = mqtt.connect('mqtts://' + printer.ipAddress + ':8883', {
@@ -217,13 +237,15 @@ function connectPrinter(printer) {
     password: printer.accessCode,
     rejectUnauthorized: false,
     clientId: 'vafrum_' + printer.serialNumber + '_' + Date.now(),
-    connectTimeout: 15000
+    connectTimeout: 15000,
+    reconnectPeriod: 0 // Wir machen eigenes Reconnect mit Backoff
   });
 
   client.on('connect', () => {
     sendLog('Drucker verbunden: ' + printer.name);
     mqttClients.set(printer.serialNumber, client);
     printers.set(printer.serialNumber, { ...printer, online: true });
+    resetReconnectCounter(printer.serialNumber);
     client.subscribe('device/' + printer.serialNumber + '/report');
     client.publish('device/' + printer.serialNumber + '/request', JSON.stringify({
       pushing: { command: 'pushall' }
@@ -238,6 +260,31 @@ function connectPrinter(printer) {
 
       // Debug: Raw MQTT data to file
       logRawMqtt(printer.serialNumber, topic, data);
+
+      // DEBUG: Log ALL messages when AMS debug mode is active
+      if (client._debugAmsCmd) {
+        // Don't log huge pushall responses fully, just the keys and AMS section
+        const keys = Object.keys(data);
+        if (data.print?.ams) {
+          const amsData = data.print.ams;
+          const trays = [];
+          if (Array.isArray(amsData.ams)) {
+            amsData.ams.forEach((unit, ui) => {
+              if (Array.isArray(unit.tray)) {
+                unit.tray.forEach((t, ti) => {
+                  if (t) trays.push('U' + ui + 'T' + ti + ':' + (t.tray_type || '?') + '/' + (t.tray_color || '?'));
+                });
+              }
+            });
+          }
+          sendLog('DEBUG MQTT AMS: trays=[' + trays.join(', ') + ']');
+        } else if (data.print?.command) {
+          // Command response from printer
+          sendLog('DEBUG MQTT RESPONSE: ' + JSON.stringify(data).substring(0, 500));
+        } else {
+          sendLog('DEBUG MQTT keys: ' + keys.join(',') + (data.print ? ' print.keys=' + Object.keys(data.print).join(',') : ''));
+        }
+      }
 
       // Log system responses (errors, command results)
       if (data.system) {
@@ -257,16 +304,23 @@ function connectPrinter(printer) {
           }
         }
 
-        // Parse AMS data
+        // Vorherigen Status holen (MUSS vor AMS-Parsing stehen!)
+        const prevStatus = printers.get(printer.serialNumber) || {};
+
+        // Parse AMS data (merge with previous to handle incremental MQTT updates)
         let ams = null;
         if (p.ams) {
+          const prevAms = prevStatus.ams || { units: [], trays: [] };
           ams = {
-            humidity: p.ams.ams_humidity,
-            trayNow: p.ams.tray_now,
-            units: [],
-            trays: []
+            humidity: p.ams.ams_humidity ?? prevAms.humidity,
+            trayNow: p.ams.tray_now ?? prevAms.trayNow,
+            units: prevAms.units || [],
+            trays: prevAms.trays || []
           };
           if (Array.isArray(p.ams.ams)) {
+            // Full tray update received - rebuild units and trays
+            ams.units = [];
+            ams.trays = [];
             p.ams.ams.forEach((unit, unitIdx) => {
               // Store unit-level info (humidity per AMS)
               // humidity_raw = actual percentage (AMS 2 Pro)
@@ -297,7 +351,10 @@ function connectPrinter(printer) {
               ams.units.push(unitData);
               if (Array.isArray(unit.tray)) {
                 unit.tray.forEach((tray, trayIdx) => {
-                  if (tray && tray.tray_type) {
+                  // Tray einschließen wenn tray_type ODER tray_color vorhanden
+                  // (AMS HT kann tray_color ohne tray_type melden)
+                  const hasData = tray && (tray.tray_type || (tray.tray_color && tray.tray_color !== '00000000'));
+                  if (hasData) {
                     ams.trays.push({
                       id: unitIdx * 4 + trayIdx,
                       unitId: unitIdx,
@@ -316,18 +373,28 @@ function connectPrinter(printer) {
           }
         }
 
-        // Parse external spool (for printers without AMS)
+        // Parse external spool: vt_tray (Standard) oder vir_slot (H2D Dual-Nozzle)
         let externalSpool = null;
-        if (p.vt_tray) {
-          externalSpool = {
-            type: p.vt_tray.tray_type || '',
-            color: p.vt_tray.tray_color || '',
-            name: p.vt_tray.tray_sub_brands || ''
-          };
+        if (Array.isArray(p.vir_slot) && p.vir_slot.length > 0) {
+          // H2D/H2C: vir_slot Array – id 254 = Nozzle 0 (links), id 253 = Nozzle 1 (rechts)
+          const slot = p.vir_slot.find(s => s.id === '254' || s.id === 254) || p.vir_slot[0];
+          if (slot) {
+            const vtType = slot.tray_type || '';
+            const vtColor = slot.tray_color || '';
+            if (vtType || (vtColor && vtColor !== '00000000')) {
+              externalSpool = { type: vtType, color: vtColor, name: slot.tray_sub_brands || '' };
+            }
+          }
+        } else if (p.vt_tray) {
+          // Standard: einzelnes vt_tray Objekt
+          const vtType = p.vt_tray.tray_type || '';
+          const vtColor = p.vt_tray.tray_color || '';
+          if (vtType || (vtColor && vtColor !== '00000000')) {
+            externalSpool = { type: vtType, color: vtColor, name: p.vt_tray.tray_sub_brands || '' };
+          }
         }
 
-        // Vorherigen Status holen für inkrementelle Updates
-        const prevStatus = printers.get(printer.serialNumber) || {};
+        // prevStatus wurde oben bereits geholt (vor AMS-Parsing)
 
         // H2D/H2C Dual Nozzle: extruder.info Array mit kodierten Temperaturen
         // Format: temp = (target << 16) | current (32-bit encoded)
@@ -420,15 +487,74 @@ function connectPrinter(printer) {
     } catch (e) {}
   });
 
-  client.on('error', (err) => sendLog('Fehler: ' + err.message));
+  client.on('error', (err) => {
+    // Fehler-Throttling: gleiche Meldung nur alle 60s loggen
+    const now = Date.now();
+    const lastLog = mqttErrorThrottle.get(printer.serialNumber) || 0;
+    if (now - lastLog > 60000) {
+      sendLog('Fehler ' + printer.name + ': ' + err.message);
+      mqttErrorThrottle.set(printer.serialNumber, now);
+    }
+  });
+
   client.on('close', () => {
     mqttClients.delete(printer.serialNumber);
     const pr = printers.get(printer.serialNumber);
     if (pr) {
       printers.set(printer.serialNumber, { ...pr, online: false });
       updatePrinters();
+
+      // Status an API senden
+      if (apiSocket?.connected) {
+        apiSocket.emit('printer:status', {
+          printerId: printer.id,
+          serialNumber: printer.serialNumber,
+          online: false
+        });
+      }
     }
+
+    // Auto-Reconnect mit Exponential Backoff
+    scheduleReconnect(printer.serialNumber);
   });
+}
+
+// Intelligentes Reconnect mit Exponential Backoff
+let reconnectAttempts = new Map(); // serial -> attempts count
+
+function scheduleReconnect(serialNumber) {
+  const cached = printerDataCache.get(serialNumber);
+  if (!cached) return; // Kein Reconnect ohne gespeicherte Daten
+
+  // Nicht reconnecten wenn bereits verbunden
+  if (mqttClients.has(serialNumber)) return;
+
+  const attempts = reconnectAttempts.get(serialNumber) || 0;
+  // Backoff: 5s, 10s, 20s, 40s, 60s, dann max 120s
+  const delay = Math.min(5000 * Math.pow(2, attempts), 120000);
+  const delaySec = Math.round(delay / 1000);
+
+  reconnectAttempts.set(serialNumber, attempts + 1);
+
+  // Nur loggen bei erstem Versuch oder selten
+  if (attempts === 0 || attempts % 5 === 0) {
+    sendLog('Reconnect ' + cached.name + ' in ' + delaySec + 's (Versuch ' + (attempts + 1) + ')');
+  }
+
+  const timer = setTimeout(() => {
+    printerReconnectTimers.delete(serialNumber);
+    if (!mqttClients.has(serialNumber)) {
+      connectPrinter(cached);
+    }
+  }, delay);
+
+  printerReconnectTimers.set(serialNumber, timer);
+}
+
+// Reconnect-Counter zurücksetzen bei erfolgreicher Verbindung
+function resetReconnectCounter(serialNumber) {
+  reconnectAttempts.delete(serialNumber);
+  mqttErrorThrottle.delete(serialNumber);
 }
 
 function executeCommand(serialNumber, command) {
@@ -536,6 +662,54 @@ function executeCommand(serialNumber, command) {
       sendLog('Sende G-Code: G90 (absolute mode)');
       break;
 
+    // AMS Filament Setting - matching OpenSpool/ha-bambulab working format
+    case 'amsFilamentSetting':
+      const filamentCodeMap = {
+        'PLA': 'GFL99', 'PLA-S': 'GFL96', 'PLA-CF': 'GFL98',
+        'PETG': 'GFG99', 'PETG-CF': 'GFG98',
+        'ABS': 'GFB99', 'ASA': 'GFB98',
+        'TPU': 'GFU99', 'PA': 'GFN99', 'PA-CF': 'GFN98',
+        'PC': 'GFC99', 'PVA': 'GFS99', 'HIPS': 'GFS98'
+      };
+      // Use specific Bambu code if provided (from catalog), otherwise fall back to generic
+      const filamentCode = cmd.trayInfoIdx || filamentCodeMap[cmd.trayType] || 'GFL99';
+      // Debug: Log printer info
+      const printerInfo = printers.get(serialNumber);
+      sendLog('DEBUG Drucker: Model=' + (printerInfo?.model || 'UNBEKANNT') + ' SN=' + serialNumber);
+      sendLog('DEBUG AMS tray info: amsId=' + cmd.amsId + ' trayId=' + cmd.trayId + ' type=' + cmd.trayType + ' color=' + cmd.trayColor + ' trayInfoIdx=' + (cmd.trayInfoIdx || 'generic:' + filamentCode));
+      // Enable debug mode - log ALL incoming MQTT messages for 10 seconds
+      client._debugAmsCmd = true;
+      setTimeout(() => { client._debugAmsCmd = false; sendLog('DEBUG: AMS Debug-Modus Ende'); }, 10000);
+      payload = {
+        print: {
+          sequence_id: '0',
+          command: 'ams_filament_setting',
+          ams_id: cmd.amsId,
+          slot_id: cmd.trayId,
+          tray_id: cmd.trayId,
+          tray_info_idx: filamentCode,
+          setting_id: '',
+          tray_color: cmd.trayColor,
+          nozzle_temp_min: cmd.nozzleTempMin,
+          nozzle_temp_max: cmd.nozzleTempMax,
+          tray_type: cmd.trayType
+        }
+      };
+      sendLog('AMS Filament Setting payload: ' + JSON.stringify(payload));
+      client.publish(topic, JSON.stringify(payload), (err) => {
+        if (err) {
+          sendLog('AMS Filament Setting FEHLER: ' + err.message);
+        } else {
+          sendLog('AMS Filament Setting ERFOLG gesendet');
+          // Request pushall after 2s to get immediate AMS status update
+          setTimeout(() => {
+            client.publish(topic, JSON.stringify({ pushing: { command: 'pushall' } }));
+            sendLog('pushall gesendet nach filament setting');
+          }, 2000);
+        }
+      });
+      return;
+
     default: return;
   }
 
@@ -626,8 +800,8 @@ function startMjpegServer() {
     res.send(stream.lastFrame);
   });
 
-  mjpegServer = expressApp.listen(MJPEG_PORT, () => {
-    sendLog('MJPEG Server gestartet auf Port ' + MJPEG_PORT);
+  mjpegServer = expressApp.listen(MJPEG_PORT, '127.0.0.1', () => {
+    sendLog('MJPEG Server gestartet auf 127.0.0.1:' + MJPEG_PORT);
   });
 
   mjpegServer.on('error', (e) => {
@@ -871,10 +1045,26 @@ function startGo2rtc() {
 
   // Config in userData schreiben (dort haben wir Schreibrechte)
   const configFile = path.join(app.getPath('userData'), 'go2rtc.yaml');
-  fs.writeFileSync(configFile, 'api:\n  listen: ":1984"\nrtsp:\n  listen: ""\nstreams: {}\n');
+  fs.writeFileSync(configFile, 'api:\n  listen: "127.0.0.1:1984"\nrtsp:\n  listen: ""\nstreams: {}\n');
 
   go2rtcProcess = spawn(go2rtcPath, ['-c', configFile], { stdio: 'ignore', windowsHide: true });
   go2rtcProcess.on('error', (e) => sendLog('go2rtc Fehler: ' + e.message));
+
+  // Watchdog: go2rtc bei Crash automatisch neu starten
+  go2rtcProcess.on('close', (code) => {
+    sendLog('go2rtc beendet (Code: ' + code + ')');
+    go2rtcProcess = null;
+    go2rtcReady = false;
+
+    // Nur neu starten wenn App noch läuft
+    if (!app.isQuitting) {
+      sendLog('go2rtc Neustart in 3s...');
+      go2rtcWatchdogTimer = setTimeout(() => {
+        go2rtcWatchdogTimer = null;
+        startGo2rtc();
+      }, 3000);
+    }
+  });
 
   setTimeout(() => {
     go2rtcReady = true;
@@ -926,6 +1116,7 @@ function startTunnel() {
     const match = output.match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/);
     if (match) {
       config.tunnelUrl = match[0];
+      tunnelRestartAttempts = 0; // Erfolgreich - Counter zurücksetzen
       sendLog('Tunnel aktiv: ' + config.tunnelUrl);
       if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.webContents.send('config-loaded', config);
@@ -949,9 +1140,20 @@ function startTunnel() {
   });
 
   tunnelProcess.on('error', (e) => sendLog('Tunnel Fehler: ' + e.message));
-  tunnelProcess.on('close', () => {
-    sendLog('Tunnel beendet');
+  tunnelProcess.on('close', (code) => {
+    sendLog('Tunnel beendet (Code: ' + code + ')');
     tunnelProcess = null;
+
+    // Auto-Restart mit Backoff: 5s, 15s, 30s, 60s, max 300s
+    const delay = Math.min(5000 * Math.pow(2, tunnelRestartAttempts), 300000);
+    const delaySec = Math.round(delay / 1000);
+    tunnelRestartAttempts++;
+
+    sendLog('Tunnel Neustart in ' + delaySec + 's (Versuch ' + tunnelRestartAttempts + ')');
+    tunnelRestartTimer = setTimeout(() => {
+      tunnelRestartTimer = null;
+      startTunnel();
+    }, delay);
   });
 }
 
@@ -1024,7 +1226,7 @@ function restartGo2rtcWithAllStreams() {
   });
 
   const configContent = `api:
-  listen: ":1984"
+  listen: "127.0.0.1:1984"
 streams:
 ${streamsConfig}`;
 
@@ -1123,6 +1325,14 @@ app.whenReady().then(() => {
   startGo2rtc();      // go2rtc für X1/H2D
   createWindow();
 
+  // Auto-Start bei Windows-Login (kein UAC-Dialog)
+  app.setLoginItemSettings({
+    openAtLogin: true,
+    path: process.execPath,
+    args: ['--autostart']
+  });
+  sendLog('Auto-Start bei Windows-Login aktiviert');
+
   // Auto-Updater Setup
   autoUpdater.autoDownload = true;
   autoUpdater.autoInstallOnAppQuit = true;
@@ -1179,6 +1389,14 @@ app.whenReady().then(() => {
 });
 
 app.on('window-all-closed', () => {
+  app.isQuitting = true;
+
+  // Alle Reconnect-Timer stoppen
+  printerReconnectTimers.forEach(timer => clearTimeout(timer));
+  printerReconnectTimers.clear();
+  if (tunnelRestartTimer) { clearTimeout(tunnelRestartTimer); tunnelRestartTimer = null; }
+  if (go2rtcWatchdogTimer) { clearTimeout(go2rtcWatchdogTimer); go2rtcWatchdogTimer = null; }
+
   // Log Stream schließen
   if (rawMqttLogStream) {
     rawMqttLogStream.end();
