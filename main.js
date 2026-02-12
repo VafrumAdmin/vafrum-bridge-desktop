@@ -1085,18 +1085,35 @@ function startGo2rtc() {
   if (!fs.existsSync(wwwDir)) fs.mkdirSync(wwwDir, { recursive: true });
   fs.writeFileSync(path.join(wwwDir, 'stream.html'), `<!DOCTYPE html>
 <html><head><style>
-*{margin:0;padding:0}html,body{width:100%;height:100%;overflow:hidden;background:#000;display:flex}
-video-stream{display:block;width:100%;height:100%;flex:1}
-</style><script type="module" src="video-stream.js"></script></head><body>
-<script type="module">
-import {VideoStream} from './video-stream.js';
-const p=new URLSearchParams(location.search);
-const src=p.get('src');if(src){
-const v=document.createElement('video-stream');
-v.src=new URL('api/ws?src='+src,location.href);
-document.body.appendChild(v);}
-</script></body></html>`);
-  fs.writeFileSync(configFile, 'api:\n  listen: "127.0.0.1:1984"\nrtsp:\n  listen: ""\nstreams: {}\n');
+*{margin:0;padding:0}
+html,body{width:100%;height:100%;overflow:hidden;background:#000;display:flex}
+video-stream{display:block;width:100%!important;height:100%!important;flex:1 1 100%!important}
+video{width:100%!important;height:100%!important;object-fit:contain!important;display:block!important}
+</style>
+<script type="module" src="video-stream.js"></script>
+</head><body>
+<script>
+var p=new URLSearchParams(location.search);
+var src=p.get('src');
+if(src){
+  function init(){
+    var v=document.createElement('video-stream');
+    v.src=new URL('api/ws?src='+src,location.href).href;
+    v.style.cssText='width:100%;height:100%';
+    document.body.appendChild(v);
+    // Controls entfernen sobald Video erstellt wird
+    var obs=new MutationObserver(function(m){
+      var vid=document.querySelector('video');
+      if(vid){vid.controls=false;vid.style.width='100%';vid.style.height='100%';obs.disconnect();}
+    });
+    obs.observe(document.body,{childList:true,subtree:true});
+  }
+  if(customElements.get('video-stream'))init();
+  else customElements.whenDefined('video-stream').then(init);
+}
+</script>
+</body></html>`);
+  fs.writeFileSync(configFile, 'api:\n  listen: "127.0.0.1:1984"\n  static_dir: "' + wwwDir.replace(/\\/g, '/') + '"\nrtsp:\n  listen: ""\nstreams: {}\n');
 
   go2rtcProcess = spawn(go2rtcPath, ['-c', configFile], { stdio: 'ignore', windowsHide: true });
   go2rtcProcess.on('error', (e) => sendLog('go2rtc Fehler: ' + e.message));
