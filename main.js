@@ -247,9 +247,10 @@ function connectPrinter(printer) {
     printers.set(printer.serialNumber, { ...printer, online: true });
     resetReconnectCounter(printer.serialNumber);
     client.subscribe('device/' + printer.serialNumber + '/report');
-    client.publish('device/' + printer.serialNumber + '/request', JSON.stringify({
-      pushing: { command: 'pushall' }
-    }));
+    // get_version + pushall senden (wie HA-Integration - triggert device-Daten inkl. CTC)
+    const reqTopic = 'device/' + printer.serialNumber + '/request';
+    client.publish(reqTopic, JSON.stringify({ info: { sequence_id: '0', command: 'get_version' } }));
+    client.publish(reqTopic, JSON.stringify({ pushing: { sequence_id: '0', command: 'pushall' } }));
     addCameraStream(printer.serialNumber, printer.accessCode, printer.ipAddress, printer.model);
     updatePrinters();
   });
@@ -304,27 +305,20 @@ function connectPrinter(printer) {
         }
       }
 
-      // H2-DEBUG: Alle MQTT-Daten loggen (einmalig + periodisch)
+      // H2-DEBUG: Erste MQTT-Nachrichten komplett loggen (um CTC/device-Felder zu finden)
       const isH2 = printers.get(printer.serialNumber)?.model?.toUpperCase()?.includes('H2');
       if (isH2) {
-        const topKeys = Object.keys(data);
-        const debugInfo = { topKeys, hasDevice: !!data.device, hasPrint: !!data.print };
-        if (data.device) debugInfo.deviceKeys = Object.keys(data.device);
-        if (data.print) {
-          const pp = data.print;
-          debugInfo.printTempFields = {
-            nozzle_temper: pp.nozzle_temper,
-            bed_temper: pp.bed_temper,
-            chamber_temper: pp.chamber_temper,
-            'extruder.info': pp.extruder?.info,
-            'info.temp': pp.info?.temp,
-            gcode_state: pp.gcode_state
-          };
+        if (!client._h2DumpCount) client._h2DumpCount = 0;
+        if (client._h2DumpCount < 3) {
+          // Komplette Nachricht dumpen (max 1500 Zeichen um nicht zu überladen)
+          const fullDump = JSON.stringify(data).substring(0, 1500);
+          sendLog('[H2-DUMP] ' + printer.name + ' MSG#' + client._h2DumpCount + ': ' + fullDump);
+          client._h2DumpCount++;
         }
-        if (!client._h2FullDebugCount) client._h2FullDebugCount = 0;
-        if (client._h2FullDebugCount < 5) {
-          sendLog('[H2-MQTT-RAW] ' + printer.name + ': ' + JSON.stringify(debugInfo));
-          client._h2FullDebugCount++;
+        // Auch nicht-print Nachrichten loggen (device, info, system)
+        const topKeys = Object.keys(data);
+        if (!topKeys.includes('print') || topKeys.length > 1) {
+          sendLog('[H2-NONPRINT] ' + printer.name + ': topKeys=' + topKeys.join(',') + ' data=' + JSON.stringify(data).substring(0, 500));
         }
       }
 
