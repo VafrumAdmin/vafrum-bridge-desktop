@@ -291,6 +291,20 @@ function connectPrinter(printer) {
         sendLog('SYSTEM RESPONSE von ' + printer.name + ': ' + JSON.stringify(data.system));
       }
 
+      // H2D/H2C: Kammertemperatur via CTC-Modul (kommt als separate device-Nachricht!)
+      // data.device.ctc.info.temp - muss AUSSERHALB von data.print geparst werden
+      const ctcTemp = data.device?.ctc?.info?.temp;
+      if (ctcTemp !== undefined && ctcTemp !== null) {
+        const ctcValue = ctcTemp & 0xFFFF;
+        const prev = printers.get(printer.serialNumber) || {};
+        prev.chamberTemp = ctcValue;
+        printers.set(printer.serialNumber, prev);
+        if (!client._ctcLogged) {
+          sendLog('[CTC] ' + printer.name + ' Kammertemp: ' + ctcValue + '° (raw=' + ctcTemp + ')');
+          client._ctcLogged = true;
+        }
+      }
+
       if (data.print) {
         const p = data.print;
 
@@ -494,18 +508,8 @@ function connectPrinter(printer) {
           }
         }
 
-        // H2D/H2C: Kammertemperatur kommt als data.device.ctc.info.temp (CTC = Chamber Temperature Control)
-        // Nicht in data.print.chamber_temper wie bei älteren Modellen (X1C, P1S etc.)
-        // Wert muss mit & 0xFFFF maskiert werden (gleiche Kodierung wie extruder.info)
-        const ctcTemp = data.device?.ctc?.info?.temp;
-        let chamberTempValue = p.chamber_temper; // Standard-Feld (X1C, P1S, P2S etc.)
-        if (ctcTemp !== undefined && ctcTemp !== null) {
-          chamberTempValue = ctcTemp & 0xFFFF;
-          if (!client._ctcLogged) {
-            sendLog('[CTC] ' + printer.name + ' Kammertemp via device.ctc.info.temp: ' + chamberTempValue + '° (raw=' + ctcTemp + ')');
-            client._ctcLogged = true;
-          }
-        }
+        // Kammertemperatur: Standard-Feld (X1C, P1S) oder aus CTC-Cache (H2D/H2C)
+        const chamberTempValue = p.chamber_temper;
 
         const status = {
           online: true,
