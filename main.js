@@ -490,44 +490,51 @@ function connectPrinter(printer) {
           prevStatus.chamberTemp = 0;
         }
 
-        // H2D/H2C Dual Nozzle: extruder.info Array mit kodierten Temperaturen
-        // Format: temp = (target << 16) | current (32-bit encoded)
+        // Temperatur-Dekodierung: (target << 16) | current (32-bit encoded)
+        const decodeTemp = (encoded) => {
+          if (encoded === undefined || encoded === null || encoded === 0) return { current: 0, target: 0 };
+          return { current: encoded & 0xFFFF, target: (encoded >> 16) & 0xFFFF };
+        };
+
+        // Standard-Temperaturen (X1C, P1S, A1 etc.)
         let nozzle1Temp = p.nozzle_temper ?? prevStatus.nozzleTemp ?? 0;
         let nozzle1Target = p.nozzle_target_temper ?? prevStatus.nozzleTargetTemp ?? 0;
         let nozzle2Temp = p.nozzle_temper_2 ?? prevStatus.nozzleTemp2;
         let nozzle2Target = p.nozzle_target_temper_2 ?? prevStatus.nozzleTargetTemp2;
 
-        // H2D/H2C: Parse second nozzle from info.temp field
+        // H2D/H2C: Echte Düsentemps aus p.device.extruder.info (kodiert)
+        // nozzle_temper zeigt nur die Standby-Düse, nicht die aktive!
         const printerInfoH2 = printers.get(printer.serialNumber);
-        if (printerInfoH2?.model?.toUpperCase()?.includes('H2') && p.info?.temp !== undefined) {
-          nozzle2Temp = p.info.temp;
-          nozzle2Target = 0;
+        const deviceExtruder = p.device?.extruder?.info;
+        if (Array.isArray(deviceExtruder) && deviceExtruder.length >= 1) {
+          const left = decodeTemp(deviceExtruder[0]?.temp);
+          nozzle1Temp = left.current;
+          nozzle1Target = left.target;
+          if (deviceExtruder.length >= 2) {
+            const right = decodeTemp(deviceExtruder[1]?.temp);
+            nozzle2Temp = right.current;
+            nozzle2Target = right.target;
+          }
+          if (!client._extruderLogged) {
+            const n1 = decodeTemp(deviceExtruder[0]?.temp);
+            const n2 = deviceExtruder.length >= 2 ? decodeTemp(deviceExtruder[1]?.temp) : null;
+            sendLog('[H2-EXTRUDER] ' + printer.name + ' Düse1: ' + n1.current + '°/' + n1.target + '°' + (n2 ? ' Düse2: ' + n2.current + '°/' + n2.target + '°' : ''));
+            client._extruderLogged = true;
+          }
         }
-        // Fallback: Parse extruder.info array wenn vorhanden (other dual-nozzle models)
-        if (p.extruder && Array.isArray(p.extruder.info) && p.extruder.info.length >= 2) {
-          const decodeTemp = (encoded) => {
-            if (!encoded || encoded === 0) return { current: 0, target: 0 };
-            const current = encoded & 0xFFFF;
-            const target = (encoded >> 16) & 0xFFFF;
-            return { current, target };
-          };
-
+        // Fallback: p.extruder.info (älteres Format)
+        else if (p.extruder && Array.isArray(p.extruder.info) && p.extruder.info.length >= 2) {
           const left = decodeTemp(p.extruder.info[0]?.temp);
           const right = decodeTemp(p.extruder.info[1]?.temp);
-
           nozzle1Temp = left.current;
           nozzle1Target = left.target;
           nozzle2Temp = right.current;
           nozzle2Target = right.target;
-
-          if (!client._extruderLogged) {
-            log(`[H2D] Dual-Düsen erkannt - Links: ${left.current}°/${left.target}° Rechts: ${right.current}°/${right.target}°`);
-            client._extruderLogged = true;
-          }
         }
 
-        // Kammertemperatur: Standard-Feld (X1C, P1S) oder aus CTC-Cache (H2D/H2C)
-        const chamberTempValue = p.chamber_temper;
+        // Kammertemperatur: chamber_temper (X1C/P1S) oder p.info.temp (H2 Fallback)
+        // p.info.temp bei H2 = Kammertemperatur, NICHT Düse 2!
+        const chamberTempValue = p.chamber_temper ?? (printerInfoH2?.model?.toUpperCase()?.includes('H2') ? p.info?.temp : undefined);
 
         const status = {
           online: true,
