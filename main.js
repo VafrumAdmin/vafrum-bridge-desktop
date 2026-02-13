@@ -572,12 +572,14 @@ function connectPrinter(printer) {
           printError: p.print_error ?? prevStatus.printError ?? 0,
           printErrorCode: p.mc_print_error_code ?? prevStatus.printErrorCode ?? '',
           printStage: p.mc_print_stage ?? prevStatus.printStage,
-          // Temporäres Debug-Feld für H2-Diagnose: ALLE Keys durchreichen
+          // Debug-Feld für H2-Diagnose (bleibt dauerhaft drin)
           _h2debug: isH2 ? {
             printKeys: Object.keys(p).join(','),
             topKeys: Object.keys(data).join(','),
-            deviceKeys: data.device ? Object.keys(data.device).join(',') : undefined,
-            allTempFields: JSON.stringify(Object.fromEntries(Object.entries(p).filter(([k]) => k.includes('temper') || k.includes('temp') || k.includes('chamber') || k.includes('ctc'))))
+            device: p.device ? JSON.stringify(p.device).substring(0, 800) : undefined,
+            '2D': p['2D'] ? JSON.stringify(p['2D']).substring(0, 300) : undefined,
+            '3D': p['3D'] ? JSON.stringify(p['3D']).substring(0, 300) : undefined,
+            info: p.info ? JSON.stringify(p.info).substring(0, 300) : undefined
           } : undefined
         };
         printers.set(printer.serialNumber, { ...printers.get(printer.serialNumber), ...status });
