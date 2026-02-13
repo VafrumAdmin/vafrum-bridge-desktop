@@ -292,8 +292,9 @@ function connectPrinter(printer) {
         sendLog('SYSTEM RESPONSE von ' + printer.name + ': ' + JSON.stringify(data.system));
       }
 
-      // H2D/H2C: Kammertemperatur via CTC-Modul (kommt als separate device-Nachricht!)
-      const ctcTemp = data.device?.ctc?.info?.temp;
+      // H2D/H2C: Kammertemperatur via CTC-Modul
+      // Liegt in data.print.device.ctc.info.temp (NICHT data.device!)
+      const ctcTemp = data.print?.device?.ctc?.info?.temp;
       if (ctcTemp !== undefined && ctcTemp !== null) {
         const ctcValue = ctcTemp & 0xFFFF;
         const prev = printers.get(printer.serialNumber) || {};
