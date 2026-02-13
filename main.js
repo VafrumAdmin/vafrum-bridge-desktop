@@ -430,18 +430,42 @@ function connectPrinter(printer) {
 
         // prevStatus wurde oben bereits geholt (vor AMS-Parsing)
 
+        // Stale-Data Fix: Wenn gcode_state IDLE oder FINISH ist, alte Print-Daten bereinigen
+        const currentState = p.gcode_state ?? prevStatus.gcodeState;
+        if (currentState === 'IDLE' || currentState === 'FINISH') {
+          // Fehler-Flags bereinigen wenn kein aktiver Fehler gemeldet wird
+          if (p.print_error === undefined || p.print_error === null || p.print_error === 0) {
+            prevStatus.printError = 0;
+            prevStatus.printErrorCode = '';
+          }
+          prevStatus.printProgress = 0;
+          prevStatus.remainingTime = 0;
+          // Target-Temperaturen auf 0 setzen wenn nicht aktiv gedruckt wird
+          prevStatus.nozzleTargetTemp = 0;
+          prevStatus.nozzleTargetTemp2 = 0;
+          prevStatus.bedTargetTemp = 0;
+        }
+
+        // Temperatur-Staleness: Timestamp tracken wann echte Temp-Daten kamen
+        const now = Date.now();
+        if (p.nozzle_temper !== undefined || p.extruder?.info) {
+          prevStatus._lastTempUpdate = now;
+        }
+        const tempAge = now - (prevStatus._lastTempUpdate || 0);
+        const tempStale = tempAge > 60000; // > 60s ohne echte Temp-Daten = stale
+
         // H2D/H2C Dual Nozzle: extruder.info Array mit kodierten Temperaturen
         // Format: temp = (target << 16) | current (32-bit encoded)
-        let nozzle1Temp = p.nozzle_temper ?? prevStatus.nozzleTemp ?? 0;
-        let nozzle1Target = p.nozzle_target_temper ?? prevStatus.nozzleTargetTemp ?? 0;
-        let nozzle2Temp = p.nozzle_temper_2 ?? prevStatus.nozzleTemp2;
-        let nozzle2Target = p.nozzle_target_temper_2 ?? prevStatus.nozzleTargetTemp2;
+        let nozzle1Temp = p.nozzle_temper ?? (tempStale ? 0 : prevStatus.nozzleTemp) ?? 0;
+        let nozzle1Target = p.nozzle_target_temper ?? (tempStale ? 0 : prevStatus.nozzleTargetTemp) ?? 0;
+        let nozzle2Temp = p.nozzle_temper_2 ?? (tempStale ? undefined : prevStatus.nozzleTemp2);
+        let nozzle2Target = p.nozzle_target_temper_2 ?? (tempStale ? undefined : prevStatus.nozzleTargetTemp2);
 
         // H2D/H2C: Parse second nozzle from info.temp field
         const printerInfoH2 = printers.get(printer.serialNumber);
         if (printerInfoH2?.model?.toUpperCase()?.includes('H2') && p.info?.temp !== undefined) {
           nozzle2Temp = p.info.temp;
-          nozzle2Target = 0; // H2D doesn't seem to send target for second nozzle
+          nozzle2Target = 0;
         }
         // Fallback: Parse extruder.info array wenn vorhanden (other dual-nozzle models)
         if (p.extruder && Array.isArray(p.extruder.info) && p.extruder.info.length >= 2) {
@@ -466,6 +490,22 @@ function connectPrinter(printer) {
           }
         }
 
+        // Debug: H2C/H2D Temp-Felder loggen (einmalig pro Session wenn Temp-Problem erkannt)
+        if (printerInfoH2?.model?.toUpperCase()?.includes('H2') && !client._h2TempDebugLogged) {
+          const tempFields = {
+            nozzle_temper: p.nozzle_temper,
+            nozzle_target_temper: p.nozzle_target_temper,
+            nozzle_temper_2: p.nozzle_temper_2,
+            bed_temper: p.bed_temper,
+            chamber_temper: p.chamber_temper,
+            'info.temp': p.info?.temp,
+            'extruder.info': p.extruder?.info,
+          };
+          sendLog('[H2-DEBUG] ' + printer.name + ' (' + printer.serialNumber + ') Temp-Felder: ' + JSON.stringify(tempFields));
+          sendLog('[H2-DEBUG] Print-Keys: ' + Object.keys(p).join(', '));
+          client._h2TempDebugLogged = true;
+        }
+
         const status = {
           online: true,
           gcodeState: p.gcode_state ?? prevStatus.gcodeState ?? 'IDLE',
@@ -478,9 +518,9 @@ function connectPrinter(printer) {
           nozzleTargetTemp: nozzle1Target,
           nozzleTemp2: nozzle2Temp,
           nozzleTargetTemp2: nozzle2Target,
-          bedTemp: p.bed_temper ?? prevStatus.bedTemp ?? 0,
-          bedTargetTemp: p.bed_target_temper ?? prevStatus.bedTargetTemp ?? 0,
-          chamberTemp: p.chamber_temper ?? prevStatus.chamberTemp,
+          bedTemp: p.bed_temper ?? (tempStale ? 0 : prevStatus.bedTemp) ?? 0,
+          bedTargetTemp: p.bed_target_temper ?? (tempStale ? 0 : prevStatus.bedTargetTemp) ?? 0,
+          chamberTemp: p.chamber_temper ?? (tempStale ? 0 : prevStatus.chamberTemp) ?? 0,
           // Fan speeds
           partFan: p.cooling_fan_speed ?? prevStatus.partFan,
           auxFan: p.big_fan1_speed ?? prevStatus.auxFan,
@@ -504,7 +544,11 @@ function connectPrinter(printer) {
           externalSpools: externalSpools.length > 0 ? externalSpools : prevStatus.externalSpools,
           // Misc
           wifiSignal: p.wifi_signal ?? prevStatus.wifiSignal,
-          printType: p.print_type ?? prevStatus.printType
+          printType: p.print_type ?? prevStatus.printType,
+          // Error info
+          printError: p.print_error ?? prevStatus.printError ?? 0,
+          printErrorCode: p.mc_print_error_code ?? prevStatus.printErrorCode ?? '',
+          printStage: p.mc_print_stage ?? prevStatus.printStage
         };
         printers.set(printer.serialNumber, { ...printers.get(printer.serialNumber), ...status });
         updatePrinters();
