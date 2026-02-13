@@ -446,20 +446,24 @@ function connectPrinter(printer) {
           prevStatus.bedTargetTemp = 0;
         }
 
-        // Temperatur-Staleness: Timestamp tracken wann echte Temp-Daten kamen
-        const now = Date.now();
-        if (p.nozzle_temper !== undefined || p.extruder?.info) {
-          prevStatus._lastTempUpdate = now;
+        // State-Transition: Wenn Drucker von RUNNING/PAUSE/PREPARE zu IDLE/FINISH wechselt,
+        // einmalig die gecachten Ist-Temperaturen zurücksetzen damit keine 230° hängen bleiben
+        const prevState = prevStatus.gcodeState;
+        const wasPrinting = prevState === 'RUNNING' || prevState === 'PAUSE' || prevState === 'PREPARE';
+        const nowIdle = currentState === 'IDLE' || currentState === 'FINISH';
+        if (wasPrinting && nowIdle) {
+          prevStatus.nozzleTemp = 0;
+          prevStatus.nozzleTemp2 = undefined;
+          prevStatus.bedTemp = 0;
+          prevStatus.chamberTemp = 0;
         }
-        const tempAge = now - (prevStatus._lastTempUpdate || 0);
-        const tempStale = tempAge > 60000; // > 60s ohne echte Temp-Daten = stale
 
         // H2D/H2C Dual Nozzle: extruder.info Array mit kodierten Temperaturen
         // Format: temp = (target << 16) | current (32-bit encoded)
-        let nozzle1Temp = p.nozzle_temper ?? (tempStale ? 0 : prevStatus.nozzleTemp) ?? 0;
-        let nozzle1Target = p.nozzle_target_temper ?? (tempStale ? 0 : prevStatus.nozzleTargetTemp) ?? 0;
-        let nozzle2Temp = p.nozzle_temper_2 ?? (tempStale ? undefined : prevStatus.nozzleTemp2);
-        let nozzle2Target = p.nozzle_target_temper_2 ?? (tempStale ? undefined : prevStatus.nozzleTargetTemp2);
+        let nozzle1Temp = p.nozzle_temper ?? prevStatus.nozzleTemp ?? 0;
+        let nozzle1Target = p.nozzle_target_temper ?? prevStatus.nozzleTargetTemp ?? 0;
+        let nozzle2Temp = p.nozzle_temper_2 ?? prevStatus.nozzleTemp2;
+        let nozzle2Target = p.nozzle_target_temper_2 ?? prevStatus.nozzleTargetTemp2;
 
         // H2D/H2C: Parse second nozzle from info.temp field
         const printerInfoH2 = printers.get(printer.serialNumber);
@@ -518,9 +522,9 @@ function connectPrinter(printer) {
           nozzleTargetTemp: nozzle1Target,
           nozzleTemp2: nozzle2Temp,
           nozzleTargetTemp2: nozzle2Target,
-          bedTemp: p.bed_temper ?? (tempStale ? 0 : prevStatus.bedTemp) ?? 0,
-          bedTargetTemp: p.bed_target_temper ?? (tempStale ? 0 : prevStatus.bedTargetTemp) ?? 0,
-          chamberTemp: p.chamber_temper ?? (tempStale ? 0 : prevStatus.chamberTemp) ?? 0,
+          bedTemp: p.bed_temper ?? prevStatus.bedTemp ?? 0,
+          bedTargetTemp: p.bed_target_temper ?? prevStatus.bedTargetTemp ?? 0,
+          chamberTemp: p.chamber_temper ?? prevStatus.chamberTemp ?? 0,
           // Fan speeds
           partFan: p.cooling_fan_speed ?? prevStatus.partFan,
           auxFan: p.big_fan1_speed ?? prevStatus.auxFan,
