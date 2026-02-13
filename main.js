@@ -292,7 +292,6 @@ function connectPrinter(printer) {
       }
 
       // H2D/H2C: Kammertemperatur via CTC-Modul (kommt als separate device-Nachricht!)
-      // data.device.ctc.info.temp - muss AUSSERHALB von data.print geparst werden
       const ctcTemp = data.device?.ctc?.info?.temp;
       if (ctcTemp !== undefined && ctcTemp !== null) {
         const ctcValue = ctcTemp & 0xFFFF;
@@ -302,6 +301,30 @@ function connectPrinter(printer) {
         if (!client._ctcLogged) {
           sendLog('[CTC] ' + printer.name + ' Kammertemp: ' + ctcValue + '° (raw=' + ctcTemp + ')');
           client._ctcLogged = true;
+        }
+      }
+
+      // H2-DEBUG: Alle MQTT-Daten loggen (einmalig + periodisch)
+      const isH2 = printers.get(printer.serialNumber)?.model?.toUpperCase()?.includes('H2');
+      if (isH2) {
+        const topKeys = Object.keys(data);
+        const debugInfo = { topKeys, hasDevice: !!data.device, hasPrint: !!data.print };
+        if (data.device) debugInfo.deviceKeys = Object.keys(data.device);
+        if (data.print) {
+          const pp = data.print;
+          debugInfo.printTempFields = {
+            nozzle_temper: pp.nozzle_temper,
+            bed_temper: pp.bed_temper,
+            chamber_temper: pp.chamber_temper,
+            'extruder.info': pp.extruder?.info,
+            'info.temp': pp.info?.temp,
+            gcode_state: pp.gcode_state
+          };
+        }
+        if (!client._h2FullDebugCount) client._h2FullDebugCount = 0;
+        if (client._h2FullDebugCount < 5) {
+          sendLog('[H2-MQTT-RAW] ' + printer.name + ': ' + JSON.stringify(debugInfo));
+          client._h2FullDebugCount++;
         }
       }
 
@@ -553,7 +576,17 @@ function connectPrinter(printer) {
           // Error info
           printError: p.print_error ?? prevStatus.printError ?? 0,
           printErrorCode: p.mc_print_error_code ?? prevStatus.printErrorCode ?? '',
-          printStage: p.mc_print_stage ?? prevStatus.printStage
+          printStage: p.mc_print_stage ?? prevStatus.printStage,
+          // Temporäres Debug-Feld für H2-Diagnose
+          _h2debug: isH2 ? {
+            raw_nozzle: p.nozzle_temper,
+            raw_bed: p.bed_temper,
+            raw_chamber: p.chamber_temper,
+            raw_extruder: p.extruder?.info ? JSON.stringify(p.extruder.info) : undefined,
+            raw_info_temp: p.info?.temp,
+            ctc: ctcTemp,
+            topKeys: Object.keys(data).join(',')
+          } : undefined
         };
         printers.set(printer.serialNumber, { ...printers.get(printer.serialNumber), ...status });
         updatePrinters();
