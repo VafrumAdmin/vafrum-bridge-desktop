@@ -494,20 +494,17 @@ function connectPrinter(printer) {
           }
         }
 
-        // Debug: H2C/H2D Temp-Felder loggen (einmalig pro Session wenn Temp-Problem erkannt)
-        if (printerInfoH2?.model?.toUpperCase()?.includes('H2') && !client._h2TempDebugLogged) {
-          const tempFields = {
-            nozzle_temper: p.nozzle_temper,
-            nozzle_target_temper: p.nozzle_target_temper,
-            nozzle_temper_2: p.nozzle_temper_2,
-            bed_temper: p.bed_temper,
-            chamber_temper: p.chamber_temper,
-            'info.temp': p.info?.temp,
-            'extruder.info': p.extruder?.info,
-          };
-          sendLog('[H2-DEBUG] ' + printer.name + ' (' + printer.serialNumber + ') Temp-Felder: ' + JSON.stringify(tempFields));
-          sendLog('[H2-DEBUG] Print-Keys: ' + Object.keys(p).join(', '));
-          client._h2TempDebugLogged = true;
+        // H2D/H2C: Kammertemperatur kommt als data.device.ctc.info.temp (CTC = Chamber Temperature Control)
+        // Nicht in data.print.chamber_temper wie bei älteren Modellen (X1C, P1S etc.)
+        // Wert muss mit & 0xFFFF maskiert werden (gleiche Kodierung wie extruder.info)
+        const ctcTemp = data.device?.ctc?.info?.temp;
+        let chamberTempValue = p.chamber_temper; // Standard-Feld (X1C, P1S, P2S etc.)
+        if (ctcTemp !== undefined && ctcTemp !== null) {
+          chamberTempValue = ctcTemp & 0xFFFF;
+          if (!client._ctcLogged) {
+            sendLog('[CTC] ' + printer.name + ' Kammertemp via device.ctc.info.temp: ' + chamberTempValue + '° (raw=' + ctcTemp + ')');
+            client._ctcLogged = true;
+          }
         }
 
         const status = {
@@ -524,7 +521,7 @@ function connectPrinter(printer) {
           nozzleTargetTemp2: nozzle2Target,
           bedTemp: p.bed_temper ?? prevStatus.bedTemp ?? 0,
           bedTargetTemp: p.bed_target_temper ?? prevStatus.bedTargetTemp ?? 0,
-          chamberTemp: p.chamber_temper ?? prevStatus.chamberTemp ?? 0,
+          chamberTemp: chamberTempValue ?? prevStatus.chamberTemp ?? 0,
           // Fan speeds
           partFan: p.cooling_fan_speed ?? prevStatus.partFan,
           auxFan: p.big_fan1_speed ?? prevStatus.auxFan,
