@@ -496,15 +496,19 @@ function connectPrinter(printer) {
           return { current: encoded & 0xFFFF, target: (encoded >> 16) & 0xFFFF };
         };
 
-        // Standard-Temperaturen (X1C, P1S, A1 etc.)
-        let nozzle1Temp = p.nozzle_temper ?? prevStatus.nozzleTemp ?? 0;
-        let nozzle1Target = p.nozzle_target_temper ?? prevStatus.nozzleTargetTemp ?? 0;
-        let nozzle2Temp = p.nozzle_temper_2 ?? prevStatus.nozzleTemp2;
-        let nozzle2Target = p.nozzle_target_temper_2 ?? prevStatus.nozzleTargetTemp2;
+        // H2-Erkennung
+        const printerInfoH2 = printers.get(printer.serialNumber);
+        const isH2Model = printerInfoH2?.model?.toUpperCase()?.includes('H2');
+
+        // Temperaturen: H2 nutzt device.extruder.info (kodiert), NICHT nozzle_temper!
+        // nozzle_temper bei H2 = Standby-Düse (Raumtemp), nicht die aktive Düse
+        // Deshalb: H2 nimmt prevStatus (bewahrt device.extruder-Wert), andere nehmen nozzle_temper
+        let nozzle1Temp = isH2Model ? (prevStatus.nozzleTemp ?? 0) : (p.nozzle_temper ?? prevStatus.nozzleTemp ?? 0);
+        let nozzle1Target = isH2Model ? (prevStatus.nozzleTargetTemp ?? 0) : (p.nozzle_target_temper ?? prevStatus.nozzleTargetTemp ?? 0);
+        let nozzle2Temp = isH2Model ? (prevStatus.nozzleTemp2) : (p.nozzle_temper_2 ?? prevStatus.nozzleTemp2);
+        let nozzle2Target = isH2Model ? (prevStatus.nozzleTargetTemp2) : (p.nozzle_target_temper_2 ?? prevStatus.nozzleTargetTemp2);
 
         // H2D/H2C: Echte Düsentemps aus p.device.extruder.info (kodiert)
-        // nozzle_temper zeigt nur die Standby-Düse, nicht die aktive!
-        const printerInfoH2 = printers.get(printer.serialNumber);
         const deviceExtruder = p.device?.extruder?.info;
         if (Array.isArray(deviceExtruder) && deviceExtruder.length >= 1) {
           const left = decodeTemp(deviceExtruder[0]?.temp);
