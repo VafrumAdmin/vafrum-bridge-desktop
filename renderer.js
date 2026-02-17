@@ -73,7 +73,7 @@ window.bridge.onApiStatus((status) => {
     case 'connecting':
       statusText.textContent = 'Verbinde...';
       connectBtn.disabled = true;
-      disconnectBtn.disabled = true;
+      disconnectBtn.disabled = false;
       break;
     case 'disconnected':
       statusText.textContent = 'Getrennt';
