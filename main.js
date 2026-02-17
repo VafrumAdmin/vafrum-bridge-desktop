@@ -13,8 +13,9 @@ let mainWindow;
 let tunnelProcess = null;
 let mqttClients = new Map();
 let apiSocket = null;
+let apiSocket2 = null;
 let printers = new Map();
-let config = { apiUrl: '', apiKey: '', tunnelUrl: '' };
+let config = { apiUrl: '', apiKey: '', apiUrl2: '', apiKey2: '', tunnelUrl: '' };
 let configPath = '';
 let go2rtcProcess = null;
 let logsDir = '';
@@ -153,6 +154,11 @@ function connectToApi(apiUrl, apiKey) {
   apiSocket.on('authenticated', () => {
     sendLog('Authentifiziert');
     apiSocket.emit('printers:request');
+
+    // Sekundären Server verbinden falls konfiguriert
+    if (config.apiUrl2 && config.apiKey2) {
+      connectToApi2(config.apiUrl2, config.apiKey2);
+    }
   });
 
   apiSocket.on('auth:error', (error) => {
@@ -204,10 +210,58 @@ function connectToApi(apiUrl, apiKey) {
   });
 }
 
+function connectToApi2(apiUrl2, apiKey2) {
+  if (apiSocket2) apiSocket2.disconnect();
+
+  sendLog('Verbinde mit sekundärem Server...');
+
+  apiSocket2 = io(apiUrl2, {
+    path: '/socket.io',
+    transports: ['websocket', 'polling'],
+    reconnection: true,
+    reconnectionDelay: 3000,
+    reconnectionDelayMax: 30000,
+    reconnectionAttempts: Infinity,
+    timeout: 20000,
+    auth: { apiKey: apiKey2 }
+  });
+
+  apiSocket2.on('connect', () => {
+    sendLog('API2 verbunden');
+  });
+
+  apiSocket2.on('authenticated', () => {
+    sendLog('API2 authentifiziert');
+    apiSocket2.emit('printers:request');
+  });
+
+  apiSocket2.on('auth:error', (error) => {
+    sendLog('API2 Auth Fehler: ' + error);
+  });
+
+  apiSocket2.on('printers:list', (list) => {
+    sendLog('API2: ' + list.length + ' Drucker empfangen');
+  });
+
+  // Befehle vom sekundären Server ebenfalls ausführen
+  apiSocket2.on('printer:command', (data) => {
+    sendLog('API2 Befehl empfangen: ' + JSON.stringify(data.command) + ' für ' + data.serialNumber);
+    executeCommand(data.serialNumber, data.command);
+  });
+
+  apiSocket2.on('disconnect', () => {
+    sendLog('API2 getrennt');
+  });
+}
+
 function disconnectApi() {
   if (apiSocket) {
     apiSocket.disconnect();
     apiSocket = null;
+  }
+  if (apiSocket2) {
+    apiSocket2.disconnect();
+    apiSocket2 = null;
   }
   mqttClients.forEach(c => c.end());
   mqttClients.clear();
@@ -476,6 +530,7 @@ function connectPrinter(printer) {
           prevStatus.nozzleTargetTemp = 0;
           prevStatus.nozzleTargetTemp2 = 0;
           prevStatus.bedTargetTemp = 0;
+          prevStatus.hms = [];
         }
 
         // State-Transition: Wenn Drucker von RUNNING/PAUSE/PREPARE zu IDLE/FINISH wechselt,
@@ -583,6 +638,7 @@ function connectPrinter(printer) {
           printError: p.print_error ?? prevStatus.printError ?? 0,
           printErrorCode: p.mc_print_error_code ?? prevStatus.printErrorCode ?? '',
           printStage: p.mc_print_stage ?? prevStatus.printStage,
+          hms: Array.isArray(p.hms) ? p.hms : (prevStatus.hms || []),
           // Debug-Feld für H2-Diagnose (bleibt dauerhaft drin)
           _h2debug: isH2 ? {
             printKeys: Object.keys(p).join(','),
@@ -599,6 +655,14 @@ function connectPrinter(printer) {
 
         if (apiSocket?.connected) {
           apiSocket.emit('printer:status', {
+            printerId: printer.id,
+            serialNumber: printer.serialNumber,
+            ...status,
+            cameraUrl: cameraUrls.get(printer.serialNumber) || undefined
+          });
+        }
+        if (apiSocket2?.connected) {
+          apiSocket2.emit('printer:status', {
             printerId: printer.id,
             serialNumber: printer.serialNumber,
             ...status,
@@ -629,6 +693,13 @@ function connectPrinter(printer) {
       // Status an API senden
       if (apiSocket?.connected) {
         apiSocket.emit('printer:status', {
+          printerId: printer.id,
+          serialNumber: printer.serialNumber,
+          online: false
+        });
+      }
+      if (apiSocket2?.connected) {
+        apiSocket2.emit('printer:status', {
           printerId: printer.id,
           serialNumber: printer.serialNumber,
           online: false
@@ -851,9 +922,24 @@ function updatePrinters() {
   }
 }
 
-ipcMain.handle('connect', (e, { apiUrl, apiKey }) => {
-  saveConfig({ apiUrl, apiKey });
+ipcMain.handle('connect', (e, { apiUrl, apiKey, apiUrl2, apiKey2 }) => {
+  saveConfig({ apiUrl, apiKey, apiUrl2: apiUrl2 || '', apiKey2: apiKey2 || '' });
   connectToApi(apiUrl, apiKey);
+});
+
+ipcMain.handle('save-connect-api2', (e, { apiUrl2, apiKey2 }) => {
+  saveConfig({ apiUrl2: apiUrl2 || '', apiKey2: apiKey2 || '' });
+  // Alten Socket trennen
+  if (apiSocket2) {
+    apiSocket2.disconnect();
+    apiSocket2 = null;
+  }
+  // Neu verbinden falls URL+Key vorhanden
+  if (apiUrl2 && apiKey2) {
+    connectToApi2(apiUrl2, apiKey2);
+  } else {
+    sendLog('Sekundärer Server deaktiviert');
+  }
 });
 
 ipcMain.handle('disconnect', () => disconnectApi());
@@ -956,11 +1042,46 @@ function startJpegStream(serial, accessCode, ip) {
   const streamData = {
     socket: null,
     lastFrame: null,
+    lastFrameTime: 0,
     clients: new Set(),
     reconnectAttempts: 0,
-    buffer: Buffer.alloc(0)
+    buffer: Buffer.alloc(0),
+    watchdogTimer: null,
+    accessCode: accessCode,
+    ip: ip
   };
   jpegStreams.set(serial, streamData);
+
+  // Watchdog: Prüft alle 30s ob Frames kommen, reconnected nach 60s Stille
+  streamData.watchdogTimer = setInterval(() => {
+    if (!jpegStreams.has(serial)) {
+      clearInterval(streamData.watchdogTimer);
+      return;
+    }
+    const now = Date.now();
+    const silent = now - streamData.lastFrameTime;
+    if (streamData.lastFrameTime > 0 && silent > 60000 && streamData.socket) {
+      sendLog('JPEG Watchdog: Kein Frame seit ' + Math.round(silent / 1000) + 's, reconnect: ' + serial);
+      streamData.socket.destroy();
+      streamData.socket = null;
+      streamData.buffer = Buffer.alloc(0);
+      streamData.receivedData = false;
+      streamData.reconnectAttempts = 0;
+      connectJpegStream(serial, accessCode, ip, streamData);
+    } else if (streamData.lastFrameTime === 0 && streamData.socket && streamData.receivedData === false) {
+      // Auth gesendet aber nie Daten empfangen → nach 30s reconnect
+      const socketAge = now - (streamData.connectTime || now);
+      if (socketAge > 30000) {
+        sendLog('JPEG Watchdog: Nie Daten empfangen nach ' + Math.round(socketAge / 1000) + 's, reconnect: ' + serial);
+        streamData.socket.destroy();
+        streamData.socket = null;
+        streamData.buffer = Buffer.alloc(0);
+        streamData.receivedData = false;
+        streamData.reconnectAttempts = 0;
+        connectJpegStream(serial, accessCode, ip, streamData);
+      }
+    }
+  }, 30000);
 
   connectJpegStream(serial, accessCode, ip, streamData);
 
@@ -1019,6 +1140,9 @@ function connectJpegStream(serial, accessCode, ip, streamData) {
     rejectUnauthorized: false
   };
 
+  streamData.connectTime = Date.now();
+  streamData.receivedData = false;
+
   const socket = tls.connect(options, () => {
     sendLog('TLS verbunden: ' + serial);
     streamData.reconnectAttempts = 0;
@@ -1057,15 +1181,16 @@ function connectJpegStream(serial, accessCode, ip, streamData) {
     sendLog('JPEG Stream geschlossen: ' + serial + ' (Fehler: ' + hadError + ', Daten empfangen: ' + !!streamData.receivedData + ')');
     streamData.socket = null;
 
-    // Reconnect nach 5 Sekunden
-    if (streamData.reconnectAttempts < 12) {
+    // Reconnect solange Stream aktiv - mit exponential backoff (max 30s)
+    if (jpegStreams.has(serial)) {
       streamData.reconnectAttempts++;
+      const delay = Math.min(5000 * Math.pow(1.5, Math.min(streamData.reconnectAttempts - 1, 6)), 30000);
+      sendLog('Reconnect in ' + Math.round(delay / 1000) + 's (Versuch ' + streamData.reconnectAttempts + '): ' + serial);
       setTimeout(() => {
         if (jpegStreams.has(serial)) {
-          sendLog('Reconnect Versuch ' + streamData.reconnectAttempts + ' für: ' + serial);
           connectJpegStream(serial, accessCode, ip, streamData);
         }
-      }, 5000);
+      }, delay);
     }
   });
 
@@ -1108,6 +1233,7 @@ function processJpegBuffer(serial, streamData) {
     // Validieren und speichern
     if (jpegData.length > 100) { // Mindestgröße für gültiges JPEG
       streamData.lastFrame = jpegData;
+      streamData.lastFrameTime = Date.now();
       streamData.frameCount = (streamData.frameCount || 0) + 1;
 
       // Nur alle 10 Frames loggen um Spam zu vermeiden
@@ -1126,6 +1252,10 @@ function processJpegBuffer(serial, streamData) {
 function stopJpegStream(serial) {
   const stream = jpegStreams.get(serial);
   if (stream) {
+    if (stream.watchdogTimer) {
+      clearInterval(stream.watchdogTimer);
+      stream.watchdogTimer = null;
+    }
     if (stream.socket) {
       stream.socket.destroy();
     }
@@ -1292,6 +1422,13 @@ function startTunnel() {
             cameraUrl: mjpegUrl
           });
         }
+        if (apiSocket2?.connected) {
+          apiSocket2.emit('printer:status', {
+            printerId: printer.id,
+            serialNumber: serial,
+            cameraUrl: mjpegUrl
+          });
+        }
       });
     }
   });
@@ -1453,6 +1590,11 @@ ipcMain.handle('set-tunnel', (e, tunnelUrl) => {
       cameraUrls.set(serial, baseUrl + '/api/stream.mjpeg?src=cam_' + serial);
     }
   });
+});
+
+// Version-Handler
+ipcMain.handle('get-version', () => {
+  return app.getVersion();
 });
 
 // Update-Handler

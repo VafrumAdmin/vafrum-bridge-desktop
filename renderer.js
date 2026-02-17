@@ -1,6 +1,8 @@
 // DOM Elements
 const apiUrlInput = document.getElementById('apiUrl');
 const apiKeyInput = document.getElementById('apiKey');
+const apiUrl2Input = document.getElementById('apiUrl2');
+const apiKey2Input = document.getElementById('apiKey2');
 const tunnelUrlInput = document.getElementById('tunnelUrl');
 const saveTunnelBtn = document.getElementById('saveTunnelBtn');
 const connectBtn = document.getElementById('connectBtn');
@@ -17,6 +19,15 @@ saveTunnelBtn.addEventListener('click', () => {
   window.bridge.setTunnel(url);
 });
 
+// Sekundären Server separat speichern & verbinden
+const saveApi2Btn = document.getElementById('saveApi2Btn');
+saveApi2Btn.addEventListener('click', () => {
+  const url2 = apiUrl2Input.value.trim();
+  const key2 = apiKey2Input.value.trim();
+  window.bridge.saveAndConnectApi2(url2, key2);
+  addLog('Sekundärer Server gespeichert' + (url2 ? ' & Verbindung gestartet' : ' (leer = deaktiviert)'));
+});
+
 // Event Listeners
 connectBtn.addEventListener('click', () => {
   const apiUrl = apiUrlInput.value.trim();
@@ -27,7 +38,9 @@ connectBtn.addEventListener('click', () => {
     return;
   }
 
-  window.bridge.connect(apiUrl, apiKey);
+  const apiUrl2 = apiUrl2Input.value.trim();
+  const apiKey2 = apiKey2Input.value.trim();
+  window.bridge.connect(apiUrl, apiKey, apiUrl2, apiKey2);
 });
 
 disconnectBtn.addEventListener('click', () => {
@@ -38,6 +51,8 @@ disconnectBtn.addEventListener('click', () => {
 window.bridge.onConfigLoaded((config) => {
   if (config.apiUrl) apiUrlInput.value = config.apiUrl;
   if (config.apiKey) apiKeyInput.value = config.apiKey;
+  if (config.apiUrl2) apiUrl2Input.value = config.apiUrl2;
+  if (config.apiKey2) apiKey2Input.value = config.apiKey2;
   if (config.tunnelUrl) tunnelUrlInput.value = config.tunnelUrl;
 });
 
@@ -94,81 +109,125 @@ function addLog(msg, type = '') {
 }
 
 function renderPrinters() {
+  printersList.textContent = '';
+
   if (printers.length === 0) {
-    printersList.innerHTML = '<div class="empty-state">Keine Drucker verbunden</div>';
+    const empty = document.createElement('div');
+    empty.className = 'empty-state';
+    empty.textContent = 'Keine Drucker verbunden';
+    printersList.appendChild(empty);
     return;
   }
 
-  printersList.innerHTML = printers.map(p => {
+  printers.forEach(p => {
     const isOnline = p.online;
     const isPrinting = p.gcodeState === 'RUNNING';
     const isPaused = p.gcodeState === 'PAUSE';
 
-    return `
-      <div class="printer-card">
-        <div class="printer-icon">${isPrinting ? '🖨️' : '📦'}</div>
-        <div class="printer-info">
-          <div class="printer-name">${p.name}</div>
-          <div class="printer-status ${isOnline ? 'online' : ''}">${getStatusText(p.gcodeState, isOnline)}</div>
-          ${isOnline ? `
-            <div class="printer-temps">
-              ${p.nozzleTemp2 !== undefined ? `
-                <div class="temp-item">
-                  <span class="temp-label">Düse L:</span>
-                  <span class="temp-value">${Math.round(p.nozzleTemp || 0)}°${p.nozzleTargetTemp ? '/' + p.nozzleTargetTemp + '°' : ''}</span>
-                </div>
-                <div class="temp-item">
-                  <span class="temp-label">Düse R:</span>
-                  <span class="temp-value">${Math.round(p.nozzleTemp2 || 0)}°${p.nozzleTargetTemp2 ? '/' + p.nozzleTargetTemp2 + '°' : ''}</span>
-                </div>
-              ` : `
-                <div class="temp-item">
-                  <span class="temp-label">Düse:</span>
-                  <span class="temp-value">${Math.round(p.nozzleTemp || 0)}°${p.nozzleTargetTemp ? '/' + p.nozzleTargetTemp + '°' : ''}</span>
-                </div>
-              `}
-              <div class="temp-item">
-                <span class="temp-label">Bett:</span>
-                <span class="temp-value">${Math.round(p.bedTemp || 0)}°${p.bedTargetTemp ? '/' + p.bedTargetTemp + '°' : ''}</span>
-              </div>
-              ${p.chamberTemp !== undefined ? `
-                <div class="temp-item">
-                  <span class="temp-label">Kammer:</span>
-                  <span class="temp-value">${Math.round(p.chamberTemp)}°</span>
-                </div>
-              ` : ''}
-            </div>
-          ` : ''}
-          ${(isPrinting || isPaused) ? `
-            <div class="printer-progress">
-              <div class="progress-bar">
-                <div class="progress-fill" style="width: ${p.printProgress || 0}%"></div>
-              </div>
-              <div class="progress-text">
-                ${p.printProgress || 0}% - ${p.currentFile || 'Unbekannt'}
-                ${p.remainingTime ? ' - ' + formatTime(p.remainingTime) + ' verbleibend' : ''}
-              </div>
-            </div>
-            <div class="printer-controls">
-              ${isPrinting ? `
-                <button class="ctrl-btn pause" data-serial="${p.serialNumber}" data-cmd="pause">Pause</button>
-              ` : ''}
-              ${isPaused ? `
-                <button class="ctrl-btn resume" data-serial="${p.serialNumber}" data-cmd="resume">Fortsetzen</button>
-              ` : ''}
-              <button class="ctrl-btn stop" data-serial="${p.serialNumber}" data-cmd="stop">Stop</button>
-            </div>
-          ` : ''}
-          ${isOnline ? `
-            <div class="printer-controls" style="margin-top: 8px;">
-              <button class="ctrl-btn" data-serial="${p.serialNumber}" data-cmd="light">Licht</button>
-              <button class="ctrl-btn" data-serial="${p.serialNumber}" data-cmd="home">Home</button>
-            </div>
-          ` : ''}
-        </div>
-      </div>
-    `;
-  }).join('');
+    const card = document.createElement('div');
+    card.className = 'printer-card';
+
+    const icon = document.createElement('div');
+    icon.className = 'printer-icon';
+    icon.textContent = isPrinting ? '\u{1F5A8}\uFE0F' : '\u{1F4E6}';
+    card.appendChild(icon);
+
+    const info = document.createElement('div');
+    info.className = 'printer-info';
+
+    const name = document.createElement('div');
+    name.className = 'printer-name';
+    name.textContent = p.name;
+    info.appendChild(name);
+
+    const status = document.createElement('div');
+    status.className = 'printer-status' + (isOnline ? ' online' : '');
+    status.textContent = getStatusText(p.gcodeState, isOnline);
+    info.appendChild(status);
+
+    if (isOnline) {
+      const temps = document.createElement('div');
+      temps.className = 'printer-temps';
+
+      if (p.nozzleTemp2 !== undefined) {
+        temps.appendChild(createTempItem('Düse L:', Math.round(p.nozzleTemp || 0) + '\u00B0' + (p.nozzleTargetTemp ? '/' + p.nozzleTargetTemp + '\u00B0' : '')));
+        temps.appendChild(createTempItem('Düse R:', Math.round(p.nozzleTemp2 || 0) + '\u00B0' + (p.nozzleTargetTemp2 ? '/' + p.nozzleTargetTemp2 + '\u00B0' : '')));
+      } else {
+        temps.appendChild(createTempItem('Düse:', Math.round(p.nozzleTemp || 0) + '\u00B0' + (p.nozzleTargetTemp ? '/' + p.nozzleTargetTemp + '\u00B0' : '')));
+      }
+
+      temps.appendChild(createTempItem('Bett:', Math.round(p.bedTemp || 0) + '\u00B0' + (p.bedTargetTemp ? '/' + p.bedTargetTemp + '\u00B0' : '')));
+
+      if (p.chamberTemp !== undefined) {
+        temps.appendChild(createTempItem('Kammer:', Math.round(p.chamberTemp) + '\u00B0'));
+      }
+
+      info.appendChild(temps);
+    }
+
+    if (isPrinting || isPaused) {
+      const progress = document.createElement('div');
+      progress.className = 'printer-progress';
+
+      const bar = document.createElement('div');
+      bar.className = 'progress-bar';
+      const fill = document.createElement('div');
+      fill.className = 'progress-fill';
+      fill.style.width = (p.printProgress || 0) + '%';
+      bar.appendChild(fill);
+      progress.appendChild(bar);
+
+      const text = document.createElement('div');
+      text.className = 'progress-text';
+      let progressStr = (p.printProgress || 0) + '% - ' + (p.currentFile || 'Unbekannt');
+      if (p.remainingTime) progressStr += ' - ' + formatTime(p.remainingTime) + ' verbleibend';
+      text.textContent = progressStr;
+      progress.appendChild(text);
+      info.appendChild(progress);
+
+      const controls = document.createElement('div');
+      controls.className = 'printer-controls';
+      if (isPrinting) controls.appendChild(createCtrlBtn('Pause', p.serialNumber, 'pause', 'pause'));
+      if (isPaused) controls.appendChild(createCtrlBtn('Fortsetzen', p.serialNumber, 'resume', 'resume'));
+      controls.appendChild(createCtrlBtn('Stop', p.serialNumber, 'stop', 'stop'));
+      info.appendChild(controls);
+    }
+
+    if (isOnline) {
+      const controls2 = document.createElement('div');
+      controls2.className = 'printer-controls';
+      controls2.style.marginTop = '8px';
+      controls2.appendChild(createCtrlBtn('Licht', p.serialNumber, 'light'));
+      controls2.appendChild(createCtrlBtn('Home', p.serialNumber, 'home'));
+      info.appendChild(controls2);
+    }
+
+    card.appendChild(info);
+    printersList.appendChild(card);
+  });
+}
+
+function createTempItem(label, value) {
+  const item = document.createElement('div');
+  item.className = 'temp-item';
+  const lbl = document.createElement('span');
+  lbl.className = 'temp-label';
+  lbl.textContent = label;
+  const val = document.createElement('span');
+  val.className = 'temp-value';
+  val.textContent = value;
+  item.appendChild(lbl);
+  item.appendChild(val);
+  return item;
+}
+
+function createCtrlBtn(text, serial, cmd, extraClass) {
+  const btn = document.createElement('button');
+  btn.className = 'ctrl-btn' + (extraClass ? ' ' + extraClass : '');
+  btn.dataset.serial = serial;
+  btn.dataset.cmd = cmd;
+  btn.textContent = text;
+  return btn;
 }
 
 function getStatusText(state, online) {
@@ -276,4 +335,7 @@ window.bridge.onUpdateReset(() => {
 });
 
 // Initialize
-addLog('Vafrum Bridge gestartet');
+window.bridge.getVersion().then(v => {
+  document.getElementById('appVersion').textContent = 'v' + v;
+  addLog('Vafrum Bridge v' + v + ' gestartet');
+});
