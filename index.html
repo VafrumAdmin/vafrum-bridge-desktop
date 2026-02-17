@@ -3,6 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws: wss: http://localhost:* http://127.0.0.1:*; img-src 'self' data: blob: http://127.0.0.1:*">
   <title>Vafrum Bridge</title>
   <link rel="stylesheet" href="styles.css">
 </head>
@@ -36,12 +37,25 @@
       <h2>API Verbindung</h2>
       <div class="form-group">
         <label for="apiUrl">API URL</label>
-        <input type="text" id="apiUrl" placeholder="http://176.65.128.182:4000">
+        <input type="text" id="apiUrl" placeholder="https://vafrum-core.de">
       </div>
       <div class="form-group">
         <label for="apiKey">API Key</label>
         <input type="password" id="apiKey" placeholder="vfk_...">
       </div>
+      <hr style="border-color:#333;margin:12px 0">
+      <details class="secondary-server">
+        <summary style="cursor:pointer;color:#888;font-size:13px">Sekundärer Server (optional)</summary>
+        <div class="form-group" style="margin-top:8px">
+          <label for="apiUrl2">Sekundäre API URL</label>
+          <input type="text" id="apiUrl2" placeholder="http://...:4000">
+        </div>
+        <div class="form-group">
+          <label for="apiKey2">Sekundärer API Key</label>
+          <input type="password" id="apiKey2" placeholder="vfk_...">
+        </div>
+        <button id="saveApi2Btn" class="btn btn-small btn-primary" style="margin-top:4px">Speichern & Verbinden</button>
+      </details>
       <div class="form-group">
         <label for="tunnelUrl">Tunnel URL (ngrok)</label>
         <input type="text" id="tunnelUrl" placeholder="https://abc123.ngrok.io">

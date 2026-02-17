@@ -1,7 +1,8 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('bridge', {
-  connect: (apiUrl, apiKey) => ipcRenderer.invoke('connect', { apiUrl, apiKey }),
+  connect: (apiUrl, apiKey, apiUrl2, apiKey2) => ipcRenderer.invoke('connect', { apiUrl, apiKey, apiUrl2, apiKey2 }),
+  saveAndConnectApi2: (apiUrl2, apiKey2) => ipcRenderer.invoke('save-connect-api2', { apiUrl2, apiKey2 }),
   disconnect: () => ipcRenderer.invoke('disconnect'),
   sendCommand: (serialNumber, command) => ipcRenderer.invoke('send-command', { serialNumber, command }),
   setTunnel: (tunnelUrl) => ipcRenderer.invoke('set-tunnel', tunnelUrl),
@@ -11,6 +12,7 @@ contextBridge.exposeInMainWorld('bridge', {
   checkUpdates: () => ipcRenderer.invoke('check-updates'),
   installUpdate: () => ipcRenderer.invoke('install-update'),
   restart: () => ipcRenderer.invoke('restart-app'),
+  getVersion: () => ipcRenderer.invoke('get-version'),
 
   onLog: (callback) => ipcRenderer.on('log', (event, msg) => callback(msg)),
   onApiStatus: (callback) => ipcRenderer.on('api-status', (event, status) => callback(status)),
