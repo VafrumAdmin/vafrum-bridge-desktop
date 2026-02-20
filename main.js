@@ -26,6 +26,32 @@ let cameraStreams = new Map(); // Alle Kamera-Streams für go2rtc
 let go2rtcRestartTimer = null; // Debounce für go2rtc Neustart
 let localIp = 'localhost';
 
+// === StreamManager: Druckertyp und Plattform sind ZWEI getrennte Dimensionen ===
+// Gruppe 1: Standard JPEG über TLS Port 6000 (A-Serie + P1-Serie)
+const STREAM_GROUP_1 = ['A1', 'A1 MINI', 'P1P', 'P1S'];
+// Gruppe 2: RTSPS H264 über Port 322 via go2rtc (H-Serie + X-Serie + P2S)
+const STREAM_GROUP_2 = ['H2D', 'H2', 'H2C', 'H2S', 'X1', 'X1C', 'X1E', 'P2S'];
+
+function getStreamGroup(model) {
+  if (!model) return 1;
+  const m = model.toUpperCase();
+  for (const g2 of STREAM_GROUP_2) {
+    if (m.includes(g2)) return 2;
+  }
+  return 1;
+}
+
+function getStreamConfig(model) {
+  if (getStreamGroup(model) === 2) {
+    return { group: 2, type: 'rtsps', port: 322, urlFormat: 'stream.html' };
+  }
+  return { group: 1, type: 'mjpeg', port: 6000, urlFormat: 'stream' };
+}
+
+function getPlatformTLSConfig() {
+  return { rejectUnauthorized: false };
+}
+
 // === Auto-Reconnect & Resilience ===
 let tunnelRestartAttempts = 0;
 let tunnelRestartTimer = null;
@@ -961,11 +987,12 @@ function getLocalIp() {
 
 let pendingStreams = []; // Streams die vor go2rtc-Start ankommen
 
-// MJPEG Server für A1/P1 Kameras
+// Kombinierter Server: MJPEG für A1/P1 + Reverse-Proxy zu go2rtc für X1/H2
 function startMjpegServer() {
+  const net = require('net');
   const expressApp = express();
 
-  // MJPEG Stream Endpoint
+  // MJPEG Stream Endpoint (A1/P1 direkt)
   expressApp.get('/stream/:serial', (req, res) => {
     const serial = req.params.serial;
     const stream = jpegStreams.get(serial);
@@ -979,11 +1006,9 @@ function startMjpegServer() {
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
 
-    // Client registrieren
     stream.clients.add(res);
     sendLog('MJPEG Client verbunden: ' + serial);
 
-    // Aktuelles Frame senden falls vorhanden
     if (stream.lastFrame) {
       sendJpegFrame(res, stream.lastFrame);
     }
@@ -1008,12 +1033,171 @@ function startMjpegServer() {
     res.send(stream.lastFrame);
   });
 
+  // Dedizierter MJPEG-Proxy für go2rtc Streams (H-Serie/X-Serie Kameras)
+  expressApp.get('/go2rtc-mjpeg/:name', (req, res) => {
+    const name = req.params.name;
+    const go2rtcUrl = 'http://127.0.0.1:1984/api/stream.mjpeg?src=' + encodeURIComponent(name);
+    sendLog('[go2rtc-mjpeg] Stream angefragt: ' + name);
+
+    const go2rtcReq = http.get(go2rtcUrl, (go2rtcRes) => {
+      sendLog('[go2rtc-mjpeg] go2rtc Status: ' + go2rtcRes.statusCode + ' Content-Type: ' + (go2rtcRes.headers['content-type'] || 'FEHLT'));
+      if (go2rtcRes.statusCode !== 200) {
+        res.status(go2rtcRes.statusCode).send('go2rtc Fehler');
+        return;
+      }
+      res.writeHead(200, {
+        'Content-Type': go2rtcRes.headers['content-type'] || 'multipart/x-mixed-replace; boundary=frame',
+        'Cache-Control': 'no-cache, no-store, must-revalidate',
+        'Connection': 'keep-alive',
+        'Pragma': 'no-cache',
+      });
+      go2rtcRes.pipe(res);
+    });
+
+    go2rtcReq.on('error', (e) => {
+      sendLog('[go2rtc-mjpeg] FEHLER: ' + e.message);
+      if (!res.headersSent) res.status(502).send('go2rtc nicht erreichbar');
+    });
+
+    req.on('close', () => {
+      go2rtcReq.destroy();
+    });
+  });
+
+  // Reverse-Proxy zu go2rtc (für API-Calls wie /api/streams, /api/ws etc.)
+  expressApp.use('/api', (req, res) => {
+    const targetPath = '/api' + req.url;
+    sendLog('[go2rtc-proxy] ' + req.method + ' ' + targetPath);
+    const proxyReq = http.request({
+      hostname: '127.0.0.1', port: 1984,
+      path: targetPath, method: req.method,
+      headers: { ...req.headers, host: '127.0.0.1:1984' }
+    }, (proxyRes) => {
+      sendLog('[go2rtc-proxy] Antwort: ' + proxyRes.statusCode + ' für ' + targetPath);
+      res.writeHead(proxyRes.statusCode, proxyRes.headers);
+      proxyRes.pipe(res);
+    });
+    proxyReq.on('error', (e) => {
+      sendLog('[go2rtc-proxy] FEHLER: ' + e.message + ' für ' + targetPath);
+      if (!res.headersSent) res.status(502).send('go2rtc nicht erreichbar');
+    });
+    req.pipe(proxyReq);
+  });
+
+  // stream.html: Eigenständiger MSE-Player (kein video-stream.js nötig!)
+  // Verbindet sich per WebSocket direkt mit go2rtc und spielt H264 via MediaSource Extensions
+  expressApp.get('/stream.html', (req, res) => {
+    const qs = require('url').parse(req.url).search || '';
+    sendLog('[stream.html] angefragt: ' + qs);
+    res.setHeader('Content-Type', 'text/html');
+    res.send(`<!DOCTYPE html>
+<html><head><style>
+*{margin:0;padding:0}
+html,body{width:100%;height:100%;overflow:hidden;background:#000;display:flex;align-items:center;justify-content:center}
+video{width:100%;height:100%;object-fit:contain;display:block}
+</style></head>
+<body>
+<video id="v" autoplay playsinline muted></video>
+<script>
+var params=new URLSearchParams(location.search);
+var src=params.get('src');
+if(src){
+  var wsProto=location.protocol==='https:'?'wss:':'ws:';
+  var wsUrl=wsProto+'//'+location.host+'/api/ws?src='+src;
+  var video=document.getElementById('v');
+  var reconnectDelay=1000;
+
+  function startStream(){
+    var ws=new WebSocket(wsUrl);
+    ws.binaryType='arraybuffer';
+    var ms=null,sb=null,queue=[];
+
+    ws.onopen=function(){
+      ws.send(JSON.stringify({type:'mse'}));
+      reconnectDelay=1000;
+    };
+
+    ws.onmessage=function(ev){
+      if(typeof ev.data==='string'){
+        try{
+          var msg=JSON.parse(ev.data);
+          if(msg.type==='mse'){
+            ms=new MediaSource();
+            video.src=URL.createObjectURL(ms);
+            ms.addEventListener('sourceopen',function(){
+              try{
+                sb=ms.addSourceBuffer(msg.value);
+                sb.mode='segments';
+                sb.addEventListener('updateend',function(){
+                  if(queue.length>0&&!sb.updating){
+                    try{sb.appendBuffer(queue.shift());}catch(e){}
+                  }
+                });
+              }catch(e){}
+            });
+          }
+        }catch(e){}
+      }else{
+        if(sb){
+          if(sb.updating||queue.length>0){
+            queue.push(ev.data);
+            while(queue.length>100)queue.shift();
+          }else{
+            try{sb.appendBuffer(ev.data);}catch(e){queue.push(ev.data);}
+          }
+          if(video.buffered.length>0){
+            var end=video.buffered.end(video.buffered.length-1);
+            if(end-video.currentTime>2){video.currentTime=end-0.5;}
+          }
+        }
+      }
+    };
+
+    ws.onclose=function(){
+      sb=null;ms=null;queue=[];
+      setTimeout(startStream,reconnectDelay);
+      reconnectDelay=Math.min(reconnectDelay*1.5,10000);
+    };
+    ws.onerror=function(){};
+  }
+
+  startStream();
+  video.play().catch(function(){});
+  document.body.addEventListener('click',function(){
+    video.muted=false;video.play().catch(function(){});
+  });
+}
+</script>
+</body></html>`);
+  });
+
   mjpegServer = expressApp.listen(MJPEG_PORT, '127.0.0.1', () => {
-    sendLog('MJPEG Server gestartet auf 127.0.0.1:' + MJPEG_PORT);
+    sendLog('Kombinierter Server gestartet auf 127.0.0.1:' + MJPEG_PORT);
+  });
+
+  // WebSocket-Proxy zu go2rtc (für stream.html → /api/ws?src=...)
+  mjpegServer.on('upgrade', (req, socket, head) => {
+    sendLog('[ws-proxy] WebSocket Upgrade: ' + req.url);
+    if (req.url.startsWith('/api/')) {
+      const proxySocket = net.connect({ port: 1984, host: '127.0.0.1' }, () => {
+        let rawReq = req.method + ' ' + req.url + ' HTTP/' + req.httpVersion + '\r\n';
+        for (let i = 0; i < req.rawHeaders.length; i += 2) {
+          rawReq += req.rawHeaders[i] + ': ' + req.rawHeaders[i + 1] + '\r\n';
+        }
+        rawReq += '\r\n';
+        proxySocket.write(rawReq);
+        if (head.length > 0) proxySocket.write(head);
+        socket.pipe(proxySocket).pipe(socket);
+      });
+      proxySocket.on('error', (e) => { sendLog('[ws-proxy] Proxy-Fehler: ' + e.message); socket.destroy(); });
+      socket.on('error', () => proxySocket.destroy());
+    } else {
+      socket.destroy();
+    }
   });
 
   mjpegServer.on('error', (e) => {
-    sendLog('MJPEG Server Fehler: ' + e.message);
+    sendLog('Server Fehler: ' + e.message);
   });
 }
 
@@ -1085,59 +1269,21 @@ function startJpegStream(serial, accessCode, ip) {
 
   connectJpegStream(serial, accessCode, ip, streamData);
 
-  // go2rtc als Proxy für den lokalen MJPEG Stream nutzen
-  // So funktioniert alles über den Cloudflare Tunnel
-  const streamName = 'cam_' + serial;
-  const localMjpegUrl = 'http://127.0.0.1:' + MJPEG_PORT + '/stream/' + serial;
-
-  // Stream zu go2rtc hinzufügen (falls go2rtc bereit)
-  if (go2rtcReady) {
-    addMjpegToGo2rtc(streamName, localMjpegUrl);
-  } else {
-    // Später hinzufügen wenn go2rtc bereit
-    pendingStreams.push({ serial, accessCode, ip, model: 'A1', mjpegUrl: localMjpegUrl });
-  }
-
-  // URL über go2rtc setzen
-  const baseUrl = config.tunnelUrl || ('http://' + localIp + ':1984');
-  const mjpegUrl = baseUrl + '/api/stream.mjpeg?src=' + streamName;
+  // A1/P1: MJPEG direkt über den kombinierten Server (kein go2rtc-Umweg)
+  const baseUrl = config.tunnelUrl || ('http://' + localIp + ':' + MJPEG_PORT);
+  const mjpegUrl = baseUrl + '/stream/' + serial;
   cameraUrls.set(serial, mjpegUrl);
-  sendLog('A1/P1 Stream URL (via go2rtc): ' + mjpegUrl);
+  sendLog('A1/P1 Stream URL (direkt): ' + mjpegUrl);
 }
 
-function addMjpegToGo2rtc(streamName, mjpegUrl) {
-  const apiUrl = 'http://127.0.0.1:1984/api/streams?name=' + encodeURIComponent(streamName) + '&src=' + encodeURIComponent(mjpegUrl);
-
-  const req = http.request(apiUrl, { method: 'PUT' }, (res) => {
-    res.on('data', () => {});
-    res.on('end', () => {
-      if (res.statusCode === 200) {
-        sendLog('MJPEG Stream zu go2rtc hinzugefügt: ' + streamName);
-      } else {
-        sendLog('go2rtc MJPEG Status: ' + res.statusCode);
-        // Fallback: go2rtc Config nutzen
-        cameraStreams.set(streamName, mjpegUrl);
-        if (go2rtcRestartTimer) clearTimeout(go2rtcRestartTimer);
-        go2rtcRestartTimer = setTimeout(() => restartGo2rtcWithAllStreams(), 2000);
-      }
-    });
-  });
-
-  req.on('error', (e) => {
-    sendLog('go2rtc MJPEG Fehler: ' + e.message);
-    cameraStreams.set(streamName, mjpegUrl);
-    if (go2rtcRestartTimer) clearTimeout(go2rtcRestartTimer);
-    go2rtcRestartTimer = setTimeout(() => restartGo2rtcWithAllStreams(), 2000);
-  });
-
-  req.end();
-}
+// addMjpegToGo2rtc entfernt – A-Serie läuft direkt über Express, nicht über go2rtc
 
 function connectJpegStream(serial, accessCode, ip, streamData) {
+  const tlsConfig = getPlatformTLSConfig();
   const options = {
     host: ip,
     port: 6000,
-    rejectUnauthorized: false
+    ...tlsConfig
   };
 
   streamData.connectTime = Date.now();
@@ -1267,11 +1413,9 @@ function stopJpegStream(serial) {
   }
 }
 
-// Prüfen ob Drucker A1/P1 Serie ist (kein RTSP)
+// DEPRECATED: Nutze getStreamGroup(model) === 1 stattdessen
 function isA1P1Model(model) {
-  if (!model) return false;
-  const m = model.toUpperCase();
-  return m.includes('A1') || m.includes('P1');
+  return getStreamGroup(model) === 1;
 }
 
 function startGo2rtc() {
@@ -1296,43 +1440,9 @@ function startGo2rtc() {
   sendLog('go2rtc gefunden: ' + go2rtcPath);
 
   // Config in userData schreiben (dort haben wir Schreibrechte)
+  // KEIN static_dir! stream.html wird von Express (Port 8765) ausgeliefert, nicht go2rtc
   const configFile = path.join(app.getPath('userData'), 'go2rtc.yaml');
-  // Custom www-Ordner mit eigenem stream.html (ohne controls, volle Breite)
-  const wwwDir = path.join(app.getPath('userData'), 'www');
-  if (!fs.existsSync(wwwDir)) fs.mkdirSync(wwwDir, { recursive: true });
-  fs.writeFileSync(path.join(wwwDir, 'stream.html'), `<!DOCTYPE html>
-<html><head><style>
-*{margin:0;padding:0}
-html,body{width:100%;height:100%;overflow:hidden;background:#000;display:flex}
-header,nav{display:none!important}
-video-stream{display:block;width:100%!important;height:100%!important;flex:1 1 100%!important}
-video{width:100%!important;height:100%!important;object-fit:contain!important;display:block!important}
-</style>
-<script type="module" src="video-stream.js"></script>
-</head><body>
-<script>
-var p=new URLSearchParams(location.search);
-var src=p.get('src');
-if(src){
-  function init(){
-    var v=document.createElement('video-stream');
-    v.src=new URL('api/ws?src='+src,location.href).href;
-    v.style.cssText='width:100%;height:100%';
-    document.body.appendChild(v);
-    // Header/Nav entfernen + Controls aus
-    var obs=new MutationObserver(function(){
-      var h=document.querySelector('header');if(h)h.remove();
-      var vid=document.querySelector('video');
-      if(vid){vid.controls=false;obs.disconnect();}
-    });
-    obs.observe(document.body,{childList:true,subtree:true});
-  }
-  if(customElements.get('video-stream'))init();
-  else customElements.whenDefined('video-stream').then(init);
-}
-</script>
-</body></html>`);
-  fs.writeFileSync(configFile, 'api:\n  listen: "127.0.0.1:1984"\n  static_dir: "' + wwwDir.replace(/\\/g, '/') + '"\nrtsp:\n  listen: ""\nstreams: {}\n');
+  fs.writeFileSync(configFile, 'api:\n  listen: "127.0.0.1:1984"\nrtsp:\n  listen: ""\nstreams: {}\n');
 
   go2rtcProcess = spawn(go2rtcPath, ['-c', configFile], { stdio: 'ignore', windowsHide: true, cwd: app.getPath('userData') });
   go2rtcProcess.on('error', (e) => sendLog('go2rtc Fehler: ' + e.message));
@@ -1357,17 +1467,11 @@ if(src){
     go2rtcReady = true;
     sendLog('go2rtc gestartet');
 
-    // Pending Streams hinzufügen
+    // Pending Streams hinzufügen (nur X1/H2D RTSP, A1/P1 braucht kein go2rtc)
     if (pendingStreams.length > 0) {
       sendLog('Füge ' + pendingStreams.length + ' wartende Streams hinzu...');
       pendingStreams.forEach(s => {
-        if (s.mjpegUrl) {
-          // A1/P1 MJPEG Stream
-          addMjpegToGo2rtc('cam_' + s.serial, s.mjpegUrl);
-        } else {
-          // X1/H2D RTSP Stream
-          addCameraStream(s.serial, s.accessCode, s.ip, s.model);
-        }
+        addCameraStream(s.serial, s.accessCode, s.ip, s.model);
       });
       pendingStreams = [];
     }
@@ -1396,7 +1500,7 @@ function startTunnel() {
   }
 
   sendLog('Starte Tunnel...');
-  tunnelProcess = spawn(cfPath, ['tunnel', '--url', 'http://localhost:1984'], { windowsHide: true });
+  tunnelProcess = spawn(cfPath, ['tunnel', '--url', 'http://localhost:' + MJPEG_PORT], { windowsHide: true });
 
   tunnelProcess.stderr.on('data', (data) => {
     const output = data.toString();
@@ -1408,25 +1512,28 @@ function startTunnel() {
       if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.webContents.send('config-loaded', config);
       }
-      // Update camera URLs - alles geht über go2rtc
+      // Update camera URLs (basierend auf Stream-Gruppe des Druckertyps)
       printers.forEach((printer, serial) => {
-        const mjpegUrl = config.tunnelUrl + '/api/stream.mjpeg?src=cam_' + serial;
-        cameraUrls.set(serial, mjpegUrl);
-        sendLog('URL aktualisiert: ' + serial + ' -> ' + mjpegUrl);
+        const group = getStreamGroup(printer.model);
+        const camUrl = group === 1
+          ? config.tunnelUrl + '/stream/' + serial
+          : config.tunnelUrl + '/stream.html?src=cam_' + serial;
+        cameraUrls.set(serial, camUrl);
+        sendLog('URL aktualisiert: ' + serial + ' -> ' + camUrl);
 
         // Status mit neuer URL an API senden
         if (apiSocket?.connected) {
           apiSocket.emit('printer:status', {
             printerId: printer.id,
             serialNumber: serial,
-            cameraUrl: mjpegUrl
+            cameraUrl: camUrl
           });
         }
         if (apiSocket2?.connected) {
           apiSocket2.emit('printer:status', {
             printerId: printer.id,
             serialNumber: serial,
-            cameraUrl: mjpegUrl
+            cameraUrl: camUrl
           });
         }
       });
@@ -1451,17 +1558,18 @@ function startTunnel() {
   });
 }
 
+// === StreamManager: Zentraler Einstiegspunkt ===
 function addCameraStream(serial, accessCode, ip, model) {
-  sendLog('Kamera-Setup für: ' + serial + ' (Modell: ' + (model || 'unbekannt') + ')');
+  const streamCfg = getStreamConfig(model);
+  sendLog('Kamera-Setup: ' + serial + ' (Modell: ' + (model || 'unbekannt') + ', Gruppe: ' + streamCfg.group + ', Typ: ' + streamCfg.type + ')');
 
-  // A1/P1 nutzen JPEG Streaming auf Port 6000
-  if (isA1P1Model(model)) {
-    sendLog('A1/P1 erkannt - nutze JPEG Streaming auf Port 6000');
+  if (streamCfg.group === 1) {
+    // Gruppe 1: JPEG über TLS Port 6000 → Express MJPEG direkt
     startJpegStream(serial, accessCode, ip);
     return;
   }
 
-  // X1/H2D nutzen RTSP auf Port 322 via go2rtc
+  // Gruppe 2: RTSPS Port 322 via go2rtc → MSE Player
   if (!go2rtcReady) {
     sendLog('go2rtc nicht bereit, Stream ' + serial + ' wird in Warteschlange gestellt');
     pendingStreams.push({ serial, accessCode, ip, model });
@@ -1476,11 +1584,11 @@ function addCameraStream(serial, accessCode, ip, model) {
   // Stream zur Map hinzufügen
   cameraStreams.set(streamName, streamUrl);
 
-  // URL sofort setzen (unabhängig vom API-Erfolg)
-  const baseUrl = config.tunnelUrl || ('http://' + localIp + ':1984');
-  const mjpegUrl = baseUrl + '/api/stream.mjpeg?src=' + streamName;
-  cameraUrls.set(serial, mjpegUrl);
-  sendLog('Stream URL gesetzt: ' + streamName + ' -> ' + mjpegUrl);
+  // URL sofort setzen - stream.html für WebRTC/MSE (go2rtc kann H264 NICHT als MJPEG liefern!)
+  const baseUrl = config.tunnelUrl || ('http://' + localIp + ':' + MJPEG_PORT);
+  const streamHtmlUrl = baseUrl + '/stream.html?src=' + streamName;
+  cameraUrls.set(serial, streamHtmlUrl);
+  sendLog('Stream URL gesetzt: ' + streamName + ' -> ' + streamHtmlUrl);
 
   // Stream via API hinzufügen (ohne Neustart)
   const apiUrl = 'http://127.0.0.1:1984/api/streams?name=' + encodeURIComponent(streamName) + '&src=' + encodeURIComponent(streamUrl);
@@ -1537,12 +1645,12 @@ ${streamsConfig}`;
     // Kurz warten bis Port frei ist, dann neu starten
     setTimeout(() => {
       startGo2rtcWithConfig(go2rtcConfigPath);
-      // URLs für alle Streams aktualisieren
-      const baseUrl = config.tunnelUrl || ('http://' + localIp + ':1984');
+      // URLs für X1/H2 Streams aktualisieren - stream.html für WebRTC/MSE
+      const baseUrl = config.tunnelUrl || ('http://' + localIp + ':' + MJPEG_PORT);
       cameraStreams.forEach((url, name) => {
         const serialFromName = name.replace('cam_', '');
-        const mjpegUrl = baseUrl + '/api/stream.mjpeg?src=' + name;
-        cameraUrls.set(serialFromName, mjpegUrl);
+        const streamHtmlUrl = baseUrl + '/stream.html?src=' + name;
+        cameraUrls.set(serialFromName, streamHtmlUrl);
       });
       sendLog('Kamera URLs aktualisiert für ' + cameraStreams.size + ' Streams');
     }, 500);
@@ -1583,11 +1691,15 @@ ipcMain.handle('set-tunnel', (e, tunnelUrl) => {
   config.tunnelUrl = tunnelUrl;
   saveConfig({ tunnelUrl });
   sendLog('Tunnel URL: ' + tunnelUrl);
-  // Update camera URLs - alles geht über go2rtc
+  // Update camera URLs (basierend auf Stream-Gruppe des Druckertyps)
   printers.forEach((printer, serial) => {
     if (cameraUrls.has(serial)) {
-      const baseUrl = tunnelUrl || ('http://' + localIp + ':1984');
-      cameraUrls.set(serial, baseUrl + '/api/stream.mjpeg?src=cam_' + serial);
+      const baseUrl = tunnelUrl || ('http://' + localIp + ':' + MJPEG_PORT);
+      const group = getStreamGroup(printer.model);
+      const camUrl = group === 1
+        ? baseUrl + '/stream/' + serial
+        : baseUrl + '/stream.html?src=cam_' + serial;
+      cameraUrls.set(serial, camUrl);
     }
   });
 });
