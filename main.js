@@ -153,6 +153,10 @@ function sendLog(msg) {
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send('log', msg);
   }
+  // Remote-Logging an API-Server
+  if (apiSocket?.connected) {
+    apiSocket.emit('bridge:log', { msg, ts: Date.now() });
+  }
 }
 
 function connectToApi(apiUrl, apiKey) {
@@ -228,6 +232,38 @@ function connectToApi(apiUrl, apiKey) {
   apiSocket.on('printer:command', (data) => {
     sendLog('API Befehl empfangen: ' + JSON.stringify(data.command) + ' für ' + data.serialNumber);
     executeCommand(data.serialNumber, data.command);
+  });
+
+  // Server fragt nach aktueller Tunnel-URL (z.B. nach API-Neustart)
+  apiSocket.on('tunnel:request', () => {
+    sendLog('API fragt Tunnel-URL an');
+    if (tunnelProcess) {
+      // Named Tunnel läuft – URLs senden
+      config.tunnelUrl = TUNNEL_BASE_URL;
+      sendLog('Sende Tunnel-URL: ' + TUNNEL_BASE_URL);
+      updateAllCameraUrls();
+    } else {
+      // Kein aktiver Tunnel – neuen starten
+      sendLog('Kein aktiver Tunnel-Prozess – starte neuen...');
+      startTunnel();
+    }
+  });
+
+  // Server meldet toten Tunnel – Neustart erforderlich
+  apiSocket.on('tunnel:restart', (data) => {
+    sendLog('API meldet toten Tunnel: ' + (data?.deadHost || 'unbekannt') + ' – starte Neustart');
+    if (tunnelProcess) {
+      tunnelProcess.kill();
+      tunnelProcess = null;
+    }
+    if (tunnelRestartTimer) {
+      clearTimeout(tunnelRestartTimer);
+      tunnelRestartTimer = null;
+    }
+    tunnelRestartAttempts = 0;
+    config.tunnelUrl = null;
+    cameraUrls.clear();
+    startTunnel();
   });
 
   apiSocket.on('disconnect', () => {
@@ -1270,7 +1306,7 @@ function startJpegStream(serial, accessCode, ip) {
   connectJpegStream(serial, accessCode, ip, streamData);
 
   // A1/P1: MJPEG direkt über den kombinierten Server (kein go2rtc-Umweg)
-  const baseUrl = config.tunnelUrl || ('http://' + localIp + ':' + MJPEG_PORT);
+  const baseUrl = TUNNEL_BASE_URL || ('http://' + localIp + ':' + MJPEG_PORT);
   const mjpegUrl = baseUrl + '/stream/' + serial;
   cameraUrls.set(serial, mjpegUrl);
   sendLog('A1/P1 Stream URL (direkt): ' + mjpegUrl);
@@ -1387,6 +1423,11 @@ function processJpegBuffer(serial, streamData) {
         sendLog('Frame empfangen: ' + serial + ' (' + jpegData.length + ' bytes)');
       }
 
+      // Frame an API-Server senden (alle 3 Frames, ~2-3 fps)
+      if (streamData.frameCount % 3 === 0 && apiSocket?.connected) {
+        apiSocket.emit('bridge:frame', { serial, frame: jpegData.toString('base64'), ts: Date.now() });
+      }
+
       // An alle verbundenen Clients senden
       streamData.clients.forEach(client => {
         sendJpegFrame(client, jpegData);
@@ -1481,6 +1522,28 @@ function startGo2rtc() {
   }, 2000);
 }
 
+function setLocalCameraUrls() {
+  // Fallback: Lokale URLs setzen wenn kein Tunnel verfügbar
+  const baseUrl = 'http://' + localIp + ':' + MJPEG_PORT;
+  printers.forEach((printer, serial) => {
+    const group = getStreamGroup(printer.model);
+    const camUrl = group === 1
+      ? baseUrl + '/stream/' + serial
+      : baseUrl + '/stream.html?src=cam_' + serial;
+    cameraUrls.set(serial, camUrl);
+    if (apiSocket?.connected) {
+      apiSocket.emit('printer:status', { printerId: printer.id, serialNumber: serial, cameraUrl: camUrl });
+    }
+    if (apiSocket2?.connected) {
+      apiSocket2.emit('printer:status', { printerId: printer.id, serialNumber: serial, cameraUrl: camUrl });
+    }
+  });
+  if (printers.size > 0) sendLog('Lokale URLs gesetzt für ' + printers.size + ' Drucker (Fallback, kein Tunnel)');
+}
+
+const TUNNEL_BASE_URL = 'https://bridge.vafrum-core.de';
+const TUNNEL_TOKEN = 'eyJhIjoiYmVmNzRkMTBkNGQ5ZDdjOThhMDEzODZlYjBjNTRhMTkiLCJ0IjoiNTgwMTM2MTgtODhiMy00ZmZlLWE0ZGItNjU2M2RmOWMyNmMxIiwicyI6Ik5HSXlNVFkyTTJVdE56VXpNUzAwT0RBMExUZzBNRFV0TkdWbE5UazFNamRoTldKaiJ9';
+
 function startTunnel() {
   const locations = [
     path.join(process.resourcesPath, 'cloudflared.exe'),
@@ -1491,52 +1554,42 @@ function startTunnel() {
 
   let cfPath = null;
   for (const loc of locations) {
-    if (loc && fs.existsSync(loc)) { cfPath = loc; break; }
+    sendLog('Suche cloudflared: ' + loc + ' → ' + (loc && fs.existsSync(loc) ? 'GEFUNDEN' : 'nicht da'));
+    if (!cfPath && loc && fs.existsSync(loc)) { cfPath = loc; }
   }
 
   if (!cfPath) {
-    sendLog('cloudflared.exe nicht gefunden');
+    sendLog('cloudflared.exe nicht gefunden an keinem Pfad! Lokale URLs als Fallback.');
+    setLocalCameraUrls();
     return;
   }
 
-  sendLog('Starte Tunnel...');
-  tunnelProcess = spawn(cfPath, ['tunnel', '--url', 'http://localhost:' + MJPEG_PORT], { windowsHide: true });
+  // Tunnel-URL ist fest (Named Tunnel)
+  config.tunnelUrl = TUNNEL_BASE_URL;
+  sendLog('Starte Named Tunnel (bridge.vafrum-core.de)...');
+
+  tunnelProcess = spawn(cfPath, ['tunnel', 'run', '--token', TUNNEL_TOKEN], { windowsHide: true });
+
+  tunnelProcess.stdout.on('data', (data) => {
+    sendLog('cloudflared stdout: ' + data.toString().trim().substring(0, 200));
+  });
 
   tunnelProcess.stderr.on('data', (data) => {
     const output = data.toString();
-    const match = output.match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/);
-    if (match) {
-      config.tunnelUrl = match[0];
-      tunnelRestartAttempts = 0; // Erfolgreich - Counter zurücksetzen
-      sendLog('Tunnel aktiv: ' + config.tunnelUrl);
+    const lines = output.trim().split('\n');
+    lines.forEach(line => {
+      if (line.trim()) sendLog('cloudflared: ' + line.trim().substring(0, 200));
+    });
+
+    // Named Tunnel: Verbindung registriert
+    if (output.includes('Registered tunnel connection') || output.includes('connIndex=')) {
+      tunnelRestartAttempts = 0;
+      sendLog('Named Tunnel aktiv: ' + TUNNEL_BASE_URL);
       if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.webContents.send('config-loaded', config);
       }
-      // Update camera URLs (basierend auf Stream-Gruppe des Druckertyps)
-      printers.forEach((printer, serial) => {
-        const group = getStreamGroup(printer.model);
-        const camUrl = group === 1
-          ? config.tunnelUrl + '/stream/' + serial
-          : config.tunnelUrl + '/stream.html?src=cam_' + serial;
-        cameraUrls.set(serial, camUrl);
-        sendLog('URL aktualisiert: ' + serial + ' -> ' + camUrl);
-
-        // Status mit neuer URL an API senden
-        if (apiSocket?.connected) {
-          apiSocket.emit('printer:status', {
-            printerId: printer.id,
-            serialNumber: serial,
-            cameraUrl: camUrl
-          });
-        }
-        if (apiSocket2?.connected) {
-          apiSocket2.emit('printer:status', {
-            printerId: printer.id,
-            serialNumber: serial,
-            cameraUrl: camUrl
-          });
-        }
-      });
+      // Camera URLs aktualisieren
+      updateAllCameraUrls();
     }
   });
 
@@ -1545,7 +1598,7 @@ function startTunnel() {
     sendLog('Tunnel beendet (Code: ' + code + ')');
     tunnelProcess = null;
 
-    // Auto-Restart mit Backoff: 5s, 15s, 30s, 60s, max 300s
+    // Auto-Restart mit Backoff: 5s, 10s, 20s, 40s, max 300s
     const delay = Math.min(5000 * Math.pow(2, tunnelRestartAttempts), 300000);
     const delaySec = Math.round(delay / 1000);
     tunnelRestartAttempts++;
@@ -1555,6 +1608,32 @@ function startTunnel() {
       tunnelRestartTimer = null;
       startTunnel();
     }, delay);
+  });
+}
+
+function updateAllCameraUrls() {
+  printers.forEach((printer, serial) => {
+    const group = getStreamGroup(printer.model);
+    const camUrl = group === 1
+      ? TUNNEL_BASE_URL + '/stream/' + serial
+      : TUNNEL_BASE_URL + '/stream.html?src=cam_' + serial;
+    cameraUrls.set(serial, camUrl);
+    sendLog('URL aktualisiert: ' + serial + ' -> ' + camUrl);
+
+    if (apiSocket?.connected) {
+      apiSocket.emit('printer:status', {
+        printerId: printer.id,
+        serialNumber: serial,
+        cameraUrl: camUrl
+      });
+    }
+    if (apiSocket2?.connected) {
+      apiSocket2.emit('printer:status', {
+        printerId: printer.id,
+        serialNumber: serial,
+        cameraUrl: camUrl
+      });
+    }
   });
 }
 
@@ -1585,7 +1664,7 @@ function addCameraStream(serial, accessCode, ip, model) {
   cameraStreams.set(streamName, streamUrl);
 
   // URL sofort setzen - stream.html für WebRTC/MSE (go2rtc kann H264 NICHT als MJPEG liefern!)
-  const baseUrl = config.tunnelUrl || ('http://' + localIp + ':' + MJPEG_PORT);
+  const baseUrl = TUNNEL_BASE_URL || ('http://' + localIp + ':' + MJPEG_PORT);
   const streamHtmlUrl = baseUrl + '/stream.html?src=' + streamName;
   cameraUrls.set(serial, streamHtmlUrl);
   sendLog('Stream URL gesetzt: ' + streamName + ' -> ' + streamHtmlUrl);
@@ -1646,7 +1725,7 @@ ${streamsConfig}`;
     setTimeout(() => {
       startGo2rtcWithConfig(go2rtcConfigPath);
       // URLs für X1/H2 Streams aktualisieren - stream.html für WebRTC/MSE
-      const baseUrl = config.tunnelUrl || ('http://' + localIp + ':' + MJPEG_PORT);
+      const baseUrl = TUNNEL_BASE_URL || ('http://' + localIp + ':' + MJPEG_PORT);
       cameraStreams.forEach((url, name) => {
         const serialFromName = name.replace('cam_', '');
         const streamHtmlUrl = baseUrl + '/stream.html?src=' + name;
@@ -1688,20 +1767,11 @@ function startGo2rtcWithConfig(configPath) {
 }
 
 ipcMain.handle('set-tunnel', (e, tunnelUrl) => {
-  config.tunnelUrl = tunnelUrl;
-  saveConfig({ tunnelUrl });
-  sendLog('Tunnel URL: ' + tunnelUrl);
-  // Update camera URLs (basierend auf Stream-Gruppe des Druckertyps)
-  printers.forEach((printer, serial) => {
-    if (cameraUrls.has(serial)) {
-      const baseUrl = tunnelUrl || ('http://' + localIp + ':' + MJPEG_PORT);
-      const group = getStreamGroup(printer.model);
-      const camUrl = group === 1
-        ? baseUrl + '/stream/' + serial
-        : baseUrl + '/stream.html?src=cam_' + serial;
-      cameraUrls.set(serial, camUrl);
-    }
-  });
+  // Named Tunnel – URL ist fest bridge.vafrum-core.de
+  config.tunnelUrl = TUNNEL_BASE_URL;
+  saveConfig({ tunnelUrl: TUNNEL_BASE_URL });
+  sendLog('Tunnel URL: ' + TUNNEL_BASE_URL);
+  updateAllCameraUrls();
 });
 
 // Version-Handler
