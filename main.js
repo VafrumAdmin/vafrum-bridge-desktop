@@ -1568,7 +1568,7 @@ function startTunnel() {
   config.tunnelUrl = TUNNEL_BASE_URL;
   sendLog('Starte Named Tunnel (bridge.vafrum-core.de)...');
 
-  tunnelProcess = spawn(cfPath, ['tunnel', 'run', '--token', TUNNEL_TOKEN], { windowsHide: true });
+  tunnelProcess = spawn(cfPath, ['tunnel', '--url', 'http://localhost:' + MJPEG_PORT, 'run', '--token', TUNNEL_TOKEN], { windowsHide: true });
 
   tunnelProcess.stdout.on('data', (data) => {
     sendLog('cloudflared stdout: ' + data.toString().trim().substring(0, 200));
