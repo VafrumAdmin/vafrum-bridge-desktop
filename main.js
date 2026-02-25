@@ -10,12 +10,12 @@ const { autoUpdater } = require('electron-updater');
 const tls = require('tls');
 const express = require('express');
 let mainWindow;
-let tunnelProcess = null;
+// tunnelProcess entfernt – kein Cloudflare-Tunnel mehr
 let mqttClients = new Map();
 let apiSocket = null;
 let apiSocket2 = null;
 let printers = new Map();
-let config = { apiUrl: '', apiKey: '', apiUrl2: '', apiKey2: '', tunnelUrl: '' };
+let config = { apiUrl: '', apiKey: '', apiUrl2: '', apiKey2: '' };
 let configPath = '';
 let go2rtcProcess = null;
 let logsDir = '';
@@ -53,8 +53,6 @@ function getPlatformTLSConfig() {
 }
 
 // === Auto-Reconnect & Resilience ===
-let tunnelRestartAttempts = 0;
-let tunnelRestartTimer = null;
 let go2rtcWatchdogTimer = null;
 let mqttErrorThrottle = new Map(); // serial -> lastLogTime (Fehler-Spam vermeiden)
 let printerReconnectTimers = new Map(); // serial -> timer (Reconnect-Timer pro Drucker)
@@ -225,6 +223,7 @@ function connectToApi(apiUrl, apiKey) {
       cameraUrls.delete(data.serialNumber);
       cameraStreams.delete('cam_' + data.serialNumber);
       stopJpegStream(data.serialNumber); // JPEG Stream stoppen
+      stopRtspFrameRelay(data.serialNumber); // RTSP Relay stoppen
       updatePrinters();
     }
   });
@@ -232,38 +231,6 @@ function connectToApi(apiUrl, apiKey) {
   apiSocket.on('printer:command', (data) => {
     sendLog('API Befehl empfangen: ' + JSON.stringify(data.command) + ' für ' + data.serialNumber);
     executeCommand(data.serialNumber, data.command);
-  });
-
-  // Server fragt nach aktueller Tunnel-URL (z.B. nach API-Neustart)
-  apiSocket.on('tunnel:request', () => {
-    sendLog('API fragt Tunnel-URL an');
-    if (tunnelProcess) {
-      // Named Tunnel läuft – URLs senden
-      config.tunnelUrl = TUNNEL_BASE_URL;
-      sendLog('Sende Tunnel-URL: ' + TUNNEL_BASE_URL);
-      updateAllCameraUrls();
-    } else {
-      // Kein aktiver Tunnel – neuen starten
-      sendLog('Kein aktiver Tunnel-Prozess – starte neuen...');
-      startTunnel();
-    }
-  });
-
-  // Server meldet toten Tunnel – Neustart erforderlich
-  apiSocket.on('tunnel:restart', (data) => {
-    sendLog('API meldet toten Tunnel: ' + (data?.deadHost || 'unbekannt') + ' – starte Neustart');
-    if (tunnelProcess) {
-      tunnelProcess.kill();
-      tunnelProcess = null;
-    }
-    if (tunnelRestartTimer) {
-      clearTimeout(tunnelRestartTimer);
-      tunnelRestartTimer = null;
-    }
-    tunnelRestartAttempts = 0;
-    config.tunnelUrl = null;
-    cameraUrls.clear();
-    startTunnel();
   });
 
   apiSocket.on('disconnect', () => {
@@ -484,6 +451,14 @@ function connectPrinter(printer) {
                 temp: parseFloat(unit.temp) || 0
               };
 
+              // H2-Serie: AMS info-Feld enthält Düsen-Zuordnung (Bit 8)
+              // Bit 8 = 0 → linke Düse (nozzle 0), Bit 8 = 1 → rechte Düse (nozzle 1)
+              if (unit.info !== undefined) {
+                const infoVal = typeof unit.info === 'string' ? parseInt(unit.info) : unit.info;
+                const bit8 = (infoVal >> 8) & 0x1;
+                unitData.nozzle = bit8; // 0 = links, 1 = rechts
+              }
+
               // Nur Feuchtigkeit senden wenn tatsächlich Daten vorhanden
               if (hasHumidityRaw) {
                 // AMS 2 Pro: Exakte Prozentwerte
@@ -677,10 +652,14 @@ function connectPrinter(printer) {
           auxFan: p.big_fan1_speed ?? prevStatus.auxFan,
           chamberFan: p.big_fan2_speed ?? prevStatus.chamberFan,
           // Lights - verschiedene Drucker nutzen verschiedene Nodes
-          // A1: nur chamber_light (wird als workLight angezeigt)
+          // A1: nur chamber_light → chamberLight=false (Feature disabled), workLight von chamber_light
           // P1S: chamber_light + work_light
-          // X1/H2: chamber_light + chamber_light2
-          chamberLight: p.lights_report ? p.lights_report.find(l => l.node === 'chamber_light')?.mode === 'on' : prevStatus.chamberLight,
+          // H2C/H2D/H2S: chamber_light (links) + chamber_light2 (rechts), kein work_light
+          // X1C/X1E: chamber_light + work_light
+          chamberLight: p.lights_report ? (
+            p.lights_report.find(l => l.node === 'chamber_light')?.mode === 'on' ||
+            p.lights_report.find(l => l.node === 'chamber_light2')?.mode === 'on'
+          ) : prevStatus.chamberLight,
           workLight: p.lights_report ? (
             p.lights_report.find(l => l.node === 'chamber_light')?.mode === 'on' ||
             p.lights_report.find(l => l.node === 'chamber_light2')?.mode === 'on' ||
@@ -719,16 +698,14 @@ function connectPrinter(printer) {
           apiSocket.emit('printer:status', {
             printerId: printer.id,
             serialNumber: printer.serialNumber,
-            ...status,
-            cameraUrl: cameraUrls.get(printer.serialNumber) || undefined
+            ...status
           });
         }
         if (apiSocket2?.connected) {
           apiSocket2.emit('printer:status', {
             printerId: printer.id,
             serialNumber: printer.serialNumber,
-            ...status,
-            cameraUrl: cameraUrls.get(printer.serialNumber) || undefined
+            ...status
           });
         }
       }
@@ -832,12 +809,29 @@ function executeCommand(serialNumber, command) {
 
     // Lights
     case 'chamberLight':
-    case 'light':
-      payload = { system: { sequence_id: '0', command: 'ledctrl', led_node: 'chamber_light', led_mode: cmd.on ? 'on' : 'off', led_on_time: 500, led_off_time: 500, loop_times: 0, interval_time: 0 }, user_id: '1234567890' };
+    case 'light': {
+      // H2C/H2D/H2S: Haben ZWEI Kammer-Lichter (chamber_light=links, chamber_light2=rechts)
+      // Beide müssen gleichzeitig geschaltet werden
+      const printerCL = printers.get(serialNumber);
+      const modelUpperCL = printerCL?.model?.toUpperCase() || '';
+      const ledModeCL = cmd.on ? 'on' : 'off';
+
+      if (modelUpperCL.includes('H2D') || modelUpperCL.includes('H2S') || modelUpperCL.includes('H2C')) {
+        sendLog('chamberLight H2-Serie (' + modelUpperCL + ') -> sende an chamber_light UND chamber_light2: ' + ledModeCL);
+        const payloadLeft = { system: { sequence_id: '0', command: 'ledctrl', led_node: 'chamber_light', led_mode: ledModeCL, led_on_time: 500, led_off_time: 500, loop_times: 0, interval_time: 0 }, user_id: '1234567890' };
+        const payloadRight = { system: { sequence_id: '0', command: 'ledctrl', led_node: 'chamber_light2', led_mode: ledModeCL, led_on_time: 500, led_off_time: 500, loop_times: 0, interval_time: 0 }, user_id: '1234567890' };
+        client.publish(topic, JSON.stringify(payloadLeft));
+        client.publish(topic, JSON.stringify(payloadRight));
+        return;
+      }
+
+      payload = { system: { sequence_id: '0', command: 'ledctrl', led_node: 'chamber_light', led_mode: ledModeCL, led_on_time: 500, led_off_time: 500, loop_times: 0, interval_time: 0 }, user_id: '1234567890' };
       break;
-    case 'workLight':
-      // A1/A1 Mini: haben nur 1 Licht (Toolhead LED) - nutzt chamber_light
-      // H2D/H2S/H2C/X1: nutzen chamber_light2 für Arbeitslicht
+    }
+    case 'workLight': {
+      // A1/A1 Mini: haben nur 1 Licht (Toolhead LED) - nutzt chamber_light + work_light
+      // H2C/H2D/H2S: haben kein separates work_light - chamber_light2 ist rechtes Kammer-Licht
+      // X1C/X1E: nutzen work_light
       // P1S: nutzt work_light
       const printerWL = printers.get(serialNumber);
       const modelUpperWL = printerWL?.model?.toUpperCase() || '';
@@ -854,14 +848,17 @@ function executeCommand(serialNumber, command) {
         client.publish(topic, JSON.stringify(payloadWork));
         sendLog('Gesendet: work_light');
         return;
-      } else if (modelUpperWL.includes('H2D') || modelUpperWL.includes('H2S') || modelUpperWL.includes('H2C') || modelUpperWL.includes('X1')) {
-        payload = { system: { sequence_id: '0', command: 'ledctrl', led_node: 'chamber_light2', led_mode: ledModeWL, led_on_time: 500, led_off_time: 500, loop_times: 0, interval_time: 0 } };
-        sendLog('H2/X1 -> chamber_light2');
+      } else if (modelUpperWL.includes('H2D') || modelUpperWL.includes('H2S') || modelUpperWL.includes('H2C')) {
+        // H2-Serie: hat kein separates Arbeitslicht, nur 2 Kammer-Lichter
+        // workLight-Toggle schaltet hier chamber_light2 (rechte Seite)
+        payload = { system: { sequence_id: '0', command: 'ledctrl', led_node: 'chamber_light2', led_mode: ledModeWL, led_on_time: 500, led_off_time: 500, loop_times: 0, interval_time: 0 }, user_id: '1234567890' };
+        sendLog('H2 -> chamber_light2 (rechtes Kammer-Licht)');
       } else {
         payload = { system: { sequence_id: '0', command: 'ledctrl', led_node: 'work_light', led_mode: ledModeWL, led_on_time: 500, led_off_time: 500, loop_times: 0, interval_time: 0 } };
         sendLog('Standard -> work_light');
       }
       break;
+    }
 
     // Temperature (sequence_id 2006 + user_id + \n required for gcode_line)
     case 'nozzleTemp': payload = { print: { command: 'gcode_line', sequence_id: '2006', param: 'M104 S' + cmd.temp + '\n' }, user_id: '1234567890' }; break;
@@ -915,6 +912,107 @@ function executeCommand(serialNumber, command) {
       client.publish(topic, JSON.stringify(payload));
       payload = { print: { command: 'gcode_line', sequence_id: '2006', param: 'G90\n' }, user_id: '1234567890' };
       sendLog('Sende G-Code: G90 (absolute mode)');
+      break;
+
+    // XCam Control (z.B. first_layer_inspector, spaghetti_detector)
+    case 'xcamControl':
+      sendLog('xcamControl: module=' + cmd.moduleName + ' control=' + cmd.control);
+      payload = { xcam: { sequence_id: '0', command: 'xcam_control_set', module_name: cmd.moduleName, control: cmd.control, print_halt: cmd.printHalt || false } };
+      break;
+
+    // Print Options (Sound, Auto-Recovery, Filament Tangle Detect, etc.)
+    case 'printOption':
+      sendLog('printOption: ' + JSON.stringify(cmd));
+      payload = { print: { sequence_id: '0', command: 'print_option' } };
+      if (cmd.soundEnable !== undefined) payload.print.sound_enable = cmd.soundEnable;
+      if (cmd.autoRecovery !== undefined) payload.print.auto_recovery = cmd.autoRecovery;
+      if (cmd.filamentTangleDetect !== undefined) payload.print.filament_tangle_detect = cmd.filamentTangleDetect;
+      if (cmd.nozzleBlobDetect !== undefined) payload.print.nozzle_blob_detect = cmd.nozzleBlobDetect;
+      if (cmd.airPrintDetect !== undefined) payload.print.air_print_detect = cmd.airPrintDetect;
+      break;
+
+    // AMS Filament Drying
+    case 'amsDrying':
+      sendLog('amsDrying: amsId=' + cmd.amsId + ' temp=' + cmd.temp + ' duration=' + cmd.duration + ' mode=' + cmd.mode);
+      payload = { print: { sequence_id: '0', command: 'ams_filament_drying', ams_id: cmd.amsId, temp: cmd.temp, cooling_temp: 0, duration: cmd.duration, humidity: 0, mode: cmd.mode, rotate_tray: false } };
+      break;
+
+    // AMS User Setting (Startup Read, Tray Read)
+    case 'amsUserSetting':
+      sendLog('amsUserSetting: amsId=' + cmd.amsId + ' startupRead=' + cmd.startupReadOption + ' trayRead=' + cmd.trayReadOption);
+      payload = { print: { sequence_id: '0', command: 'ams_user_setting', ams_id: cmd.amsId, startup_read_option: cmd.startupReadOption, tray_read_option: cmd.trayReadOption } };
+      break;
+
+    // AMS Control (resume, reset, pause)
+    case 'amsControl':
+      sendLog('amsControl: param=' + cmd.param);
+      payload = { print: { sequence_id: '0', command: 'ams_control', param: cmd.param } };
+      break;
+
+    // AMS Get RFID
+    case 'amsGetRfid':
+      sendLog('amsGetRfid: amsId=' + cmd.amsId + ' slotId=' + cmd.slotId);
+      payload = { print: { sequence_id: '0', command: 'ams_get_rfid', ams_id: cmd.amsId, slot_id: cmd.slotId } };
+      break;
+
+    // Camera Recording Control
+    case 'ipcamRecord':
+      sendLog('ipcamRecord: control=' + cmd.control);
+      payload = { camera: { sequence_id: '0', command: 'ipcam_record_set', control: cmd.control } };
+      break;
+
+    // Camera Timelapse Control
+    case 'ipcamTimelapse':
+      sendLog('ipcamTimelapse: control=' + cmd.control);
+      payload = { camera: { sequence_id: '0', command: 'ipcam_timelapse', control: cmd.control } };
+      break;
+
+    // Set Accessories (Nozzle Diameter/Type)
+    case 'setAccessories':
+      sendLog('setAccessories: diameter=' + cmd.nozzleDiameter + ' type=' + cmd.nozzleType);
+      payload = { system: { sequence_id: '0', command: 'set_accessories', accessory_type: 'nozzle', nozzle_diameter: cmd.nozzleDiameter, nozzle_type: cmd.nozzleType } };
+      break;
+
+    // Get Accessories
+    case 'getAccessories':
+      sendLog('getAccessories');
+      payload = { system: { sequence_id: '0', command: 'get_accessories', accessory_type: 'none' } };
+      break;
+
+    // Get Access Code
+    case 'getAccessCode':
+      sendLog('getAccessCode');
+      payload = { system: { sequence_id: '0', command: 'get_access_code' } };
+      break;
+
+    // Skip Objects (Exclude-Objekte beim Drucken ueberspringen)
+    case 'skipObjects':
+      sendLog('skipObjects: objList=' + JSON.stringify(cmd.objList));
+      payload = { print: { sequence_id: '0', command: 'skip_objects', obj_list: cmd.objList } };
+      break;
+
+    // Buzzer Control (Piepser am Drucker)
+    case 'buzzerCtrl':
+      sendLog('buzzerCtrl: mode=' + cmd.mode);
+      payload = { print: { sequence_id: '0', command: 'buzzer_ctrl', mode: cmd.mode, reason: '' } };
+      break;
+
+    // Set Airduct Mode
+    case 'setAirduct':
+      sendLog('setAirduct: modeId=' + cmd.modeId + ' submode=' + cmd.submode);
+      payload = { print: { sequence_id: '0', command: 'set_airduct', modeId: cmd.modeId, submode: cmd.submode } };
+      break;
+
+    // Heatbed Light (An/Aus)
+    case 'heatbedLight':
+      sendLog('heatbedLight: on=' + cmd.on);
+      payload = { system: { sequence_id: '0', command: 'ledctrl', led_node: 'heatbed_light', led_mode: cmd.on ? 'on' : 'off', led_on_time: 500, led_off_time: 500, loop_times: 0, interval_time: 0 }, user_id: '1234567890' };
+      break;
+
+    // LED Flashing (Blinken fuer beliebigen LED Node)
+    case 'ledFlashing':
+      sendLog('ledFlashing: node=' + cmd.ledNode + ' onTime=' + cmd.onTime + ' offTime=' + cmd.offTime);
+      payload = { system: { sequence_id: '0', command: 'ledctrl', led_node: cmd.ledNode, led_mode: 'flashing', led_on_time: cmd.onTime, led_off_time: cmd.offTime, loop_times: 1, interval_time: 0 }, user_id: '1234567890' };
       break;
 
     // AMS Filament Setting - matching OpenSpool/ha-bambulab working format
@@ -1025,7 +1123,6 @@ let pendingStreams = []; // Streams die vor go2rtc-Start ankommen
 
 // Kombinierter Server: MJPEG für A1/P1 + Reverse-Proxy zu go2rtc für X1/H2
 function startMjpegServer() {
-  const net = require('net');
   const expressApp = express();
 
   // MJPEG Stream Endpoint (A1/P1 direkt)
@@ -1069,167 +1166,8 @@ function startMjpegServer() {
     res.send(stream.lastFrame);
   });
 
-  // Dedizierter MJPEG-Proxy für go2rtc Streams (H-Serie/X-Serie Kameras)
-  expressApp.get('/go2rtc-mjpeg/:name', (req, res) => {
-    const name = req.params.name;
-    const go2rtcUrl = 'http://127.0.0.1:1984/api/stream.mjpeg?src=' + encodeURIComponent(name);
-    sendLog('[go2rtc-mjpeg] Stream angefragt: ' + name);
-
-    const go2rtcReq = http.get(go2rtcUrl, (go2rtcRes) => {
-      sendLog('[go2rtc-mjpeg] go2rtc Status: ' + go2rtcRes.statusCode + ' Content-Type: ' + (go2rtcRes.headers['content-type'] || 'FEHLT'));
-      if (go2rtcRes.statusCode !== 200) {
-        res.status(go2rtcRes.statusCode).send('go2rtc Fehler');
-        return;
-      }
-      res.writeHead(200, {
-        'Content-Type': go2rtcRes.headers['content-type'] || 'multipart/x-mixed-replace; boundary=frame',
-        'Cache-Control': 'no-cache, no-store, must-revalidate',
-        'Connection': 'keep-alive',
-        'Pragma': 'no-cache',
-      });
-      go2rtcRes.pipe(res);
-    });
-
-    go2rtcReq.on('error', (e) => {
-      sendLog('[go2rtc-mjpeg] FEHLER: ' + e.message);
-      if (!res.headersSent) res.status(502).send('go2rtc nicht erreichbar');
-    });
-
-    req.on('close', () => {
-      go2rtcReq.destroy();
-    });
-  });
-
-  // Reverse-Proxy zu go2rtc (für API-Calls wie /api/streams, /api/ws etc.)
-  expressApp.use('/api', (req, res) => {
-    const targetPath = '/api' + req.url;
-    sendLog('[go2rtc-proxy] ' + req.method + ' ' + targetPath);
-    const proxyReq = http.request({
-      hostname: '127.0.0.1', port: 1984,
-      path: targetPath, method: req.method,
-      headers: { ...req.headers, host: '127.0.0.1:1984' }
-    }, (proxyRes) => {
-      sendLog('[go2rtc-proxy] Antwort: ' + proxyRes.statusCode + ' für ' + targetPath);
-      res.writeHead(proxyRes.statusCode, proxyRes.headers);
-      proxyRes.pipe(res);
-    });
-    proxyReq.on('error', (e) => {
-      sendLog('[go2rtc-proxy] FEHLER: ' + e.message + ' für ' + targetPath);
-      if (!res.headersSent) res.status(502).send('go2rtc nicht erreichbar');
-    });
-    req.pipe(proxyReq);
-  });
-
-  // stream.html: Eigenständiger MSE-Player (kein video-stream.js nötig!)
-  // Verbindet sich per WebSocket direkt mit go2rtc und spielt H264 via MediaSource Extensions
-  expressApp.get('/stream.html', (req, res) => {
-    const qs = require('url').parse(req.url).search || '';
-    sendLog('[stream.html] angefragt: ' + qs);
-    res.setHeader('Content-Type', 'text/html');
-    res.send(`<!DOCTYPE html>
-<html><head><style>
-*{margin:0;padding:0}
-html,body{width:100%;height:100%;overflow:hidden;background:#000;display:flex;align-items:center;justify-content:center}
-video{width:100%;height:100%;object-fit:contain;display:block}
-</style></head>
-<body>
-<video id="v" autoplay playsinline muted></video>
-<script>
-var params=new URLSearchParams(location.search);
-var src=params.get('src');
-if(src){
-  var wsProto=location.protocol==='https:'?'wss:':'ws:';
-  var wsUrl=wsProto+'//'+location.host+'/api/ws?src='+src;
-  var video=document.getElementById('v');
-  var reconnectDelay=1000;
-
-  function startStream(){
-    var ws=new WebSocket(wsUrl);
-    ws.binaryType='arraybuffer';
-    var ms=null,sb=null,queue=[];
-
-    ws.onopen=function(){
-      ws.send(JSON.stringify({type:'mse'}));
-      reconnectDelay=1000;
-    };
-
-    ws.onmessage=function(ev){
-      if(typeof ev.data==='string'){
-        try{
-          var msg=JSON.parse(ev.data);
-          if(msg.type==='mse'){
-            ms=new MediaSource();
-            video.src=URL.createObjectURL(ms);
-            ms.addEventListener('sourceopen',function(){
-              try{
-                sb=ms.addSourceBuffer(msg.value);
-                sb.mode='segments';
-                sb.addEventListener('updateend',function(){
-                  if(queue.length>0&&!sb.updating){
-                    try{sb.appendBuffer(queue.shift());}catch(e){}
-                  }
-                });
-              }catch(e){}
-            });
-          }
-        }catch(e){}
-      }else{
-        if(sb){
-          if(sb.updating||queue.length>0){
-            queue.push(ev.data);
-            while(queue.length>100)queue.shift();
-          }else{
-            try{sb.appendBuffer(ev.data);}catch(e){queue.push(ev.data);}
-          }
-          if(video.buffered.length>0){
-            var end=video.buffered.end(video.buffered.length-1);
-            if(end-video.currentTime>2){video.currentTime=end-0.5;}
-          }
-        }
-      }
-    };
-
-    ws.onclose=function(){
-      sb=null;ms=null;queue=[];
-      setTimeout(startStream,reconnectDelay);
-      reconnectDelay=Math.min(reconnectDelay*1.5,10000);
-    };
-    ws.onerror=function(){};
-  }
-
-  startStream();
-  video.play().catch(function(){});
-  document.body.addEventListener('click',function(){
-    video.muted=false;video.play().catch(function(){});
-  });
-}
-</script>
-</body></html>`);
-  });
-
   mjpegServer = expressApp.listen(MJPEG_PORT, '127.0.0.1', () => {
-    sendLog('Kombinierter Server gestartet auf 127.0.0.1:' + MJPEG_PORT);
-  });
-
-  // WebSocket-Proxy zu go2rtc (für stream.html → /api/ws?src=...)
-  mjpegServer.on('upgrade', (req, socket, head) => {
-    sendLog('[ws-proxy] WebSocket Upgrade: ' + req.url);
-    if (req.url.startsWith('/api/')) {
-      const proxySocket = net.connect({ port: 1984, host: '127.0.0.1' }, () => {
-        let rawReq = req.method + ' ' + req.url + ' HTTP/' + req.httpVersion + '\r\n';
-        for (let i = 0; i < req.rawHeaders.length; i += 2) {
-          rawReq += req.rawHeaders[i] + ': ' + req.rawHeaders[i + 1] + '\r\n';
-        }
-        rawReq += '\r\n';
-        proxySocket.write(rawReq);
-        if (head.length > 0) proxySocket.write(head);
-        socket.pipe(proxySocket).pipe(socket);
-      });
-      proxySocket.on('error', (e) => { sendLog('[ws-proxy] Proxy-Fehler: ' + e.message); socket.destroy(); });
-      socket.on('error', () => proxySocket.destroy());
-    } else {
-      socket.destroy();
-    }
+    sendLog('Lokaler MJPEG-Server gestartet auf 127.0.0.1:' + MJPEG_PORT);
   });
 
   mjpegServer.on('error', (e) => {
@@ -1305,11 +1243,9 @@ function startJpegStream(serial, accessCode, ip) {
 
   connectJpegStream(serial, accessCode, ip, streamData);
 
-  // A1/P1: MJPEG direkt über den kombinierten Server (kein go2rtc-Umweg)
-  const baseUrl = TUNNEL_BASE_URL || ('http://' + localIp + ':' + MJPEG_PORT);
-  const mjpegUrl = baseUrl + '/stream/' + serial;
-  cameraUrls.set(serial, mjpegUrl);
-  sendLog('A1/P1 Stream URL (direkt): ' + mjpegUrl);
+  // A1/P1: Kein cameraUrl nötig – Frames werden per Socket.IO an Backend gesendet
+  // Backend setzt cameraUrl automatisch auf /api/stream/:serial wenn Frames ankommen
+  sendLog('A1/P1 Stream aktiv (Frame-Relay per Socket.IO): ' + serial);
 }
 
 // addMjpegToGo2rtc entfernt – A-Serie läuft direkt über Express, nicht über go2rtc
@@ -1423,9 +1359,11 @@ function processJpegBuffer(serial, streamData) {
         sendLog('Frame empfangen: ' + serial + ' (' + jpegData.length + ' bytes)');
       }
 
-      // Frame an API-Server senden (alle 3 Frames, ~2-3 fps)
-      if (streamData.frameCount % 3 === 0 && apiSocket?.connected) {
-        apiSocket.emit('bridge:frame', { serial, frame: jpegData.toString('base64'), ts: Date.now() });
+      // Frame an API-Server senden (max alle 200ms = 5fps, aber JEDEN Frame wenn langsam)
+      const now = Date.now();
+      if (apiSocket?.connected && now - (streamData.lastSendTime || 0) >= 200) {
+        streamData.lastSendTime = now;
+        apiSocket.emit('bridge:frame', { serial, frame: jpegData.toString('base64'), ts: now });
       }
 
       // An alle verbundenen Clients senden
@@ -1481,9 +1419,40 @@ function startGo2rtc() {
   sendLog('go2rtc gefunden: ' + go2rtcPath);
 
   // Config in userData schreiben (dort haben wir Schreibrechte)
-  // KEIN static_dir! stream.html wird von Express (Port 8765) ausgeliefert, nicht go2rtc
   const configFile = path.join(app.getPath('userData'), 'go2rtc.yaml');
-  fs.writeFileSync(configFile, 'api:\n  listen: "127.0.0.1:1984"\nrtsp:\n  listen: ""\nstreams: {}\n');
+
+  // FFmpeg-Pfad ermitteln (neben go2rtc.exe oder im System-PATH)
+  let ffmpegPath = '';
+  const ffmpegLocations = [
+    path.join(process.resourcesPath || '', 'ffmpeg.exe'),
+    path.join(process.env.PORTABLE_EXECUTABLE_DIR || '', 'ffmpeg.exe'),
+    path.join(path.dirname(process.execPath), 'ffmpeg.exe'),
+    path.join(__dirname, 'ffmpeg.exe')
+  ];
+  for (const loc of ffmpegLocations) {
+    if (loc && fs.existsSync(loc)) { ffmpegPath = loc; break; }
+  }
+
+  // FFmpeg in userData kopieren (Pfad ohne Leerzeichen, sonst bricht go2rtc ab)
+  let ffmpegUsable = '';
+  if (ffmpegPath) {
+    const userDataFfmpeg = path.join(app.getPath('userData'), 'ffmpeg.exe');
+    try {
+      fs.copyFileSync(ffmpegPath, userDataFfmpeg);
+      ffmpegUsable = userDataFfmpeg;
+      sendLog('FFmpeg kopiert nach: ' + ffmpegUsable);
+    } catch (e) {
+      // Falls Copy fehlschlägt, Original nutzen (Leerzeichen-Risiko)
+      ffmpegUsable = ffmpegPath;
+      sendLog('FFmpeg Copy fehlgeschlagen, nutze Original: ' + ffmpegPath);
+    }
+  } else {
+    sendLog('FFmpeg NICHT gefunden – H-Serie Streams funktionieren ohne FFmpeg nicht als MJPEG!');
+  }
+
+  // go2rtc Config mit FFmpeg-Pfad (damit ffmpeg: Source funktioniert)
+  const ffmpegConfig = ffmpegUsable ? `\nffmpeg:\n  bin: "${ffmpegUsable.replace(/\\/g, '/')}"\n` : '';
+  fs.writeFileSync(configFile, 'api:\n  listen: "127.0.0.1:1984"\nrtsp:\n  listen: ""\nstreams: {}\n' + ffmpegConfig);
 
   go2rtcProcess = spawn(go2rtcPath, ['-c', configFile], { stdio: 'ignore', windowsHide: true, cwd: app.getPath('userData') });
   go2rtcProcess.on('error', (e) => sendLog('go2rtc Fehler: ' + e.message));
@@ -1516,126 +1485,10 @@ function startGo2rtc() {
       });
       pendingStreams = [];
     }
-
-    // Auto-start tunnel
-    startTunnel();
   }, 2000);
 }
 
-function setLocalCameraUrls() {
-  // Fallback: Lokale URLs setzen wenn kein Tunnel verfügbar
-  const baseUrl = 'http://' + localIp + ':' + MJPEG_PORT;
-  printers.forEach((printer, serial) => {
-    const group = getStreamGroup(printer.model);
-    const camUrl = group === 1
-      ? baseUrl + '/stream/' + serial
-      : baseUrl + '/stream.html?src=cam_' + serial;
-    cameraUrls.set(serial, camUrl);
-    if (apiSocket?.connected) {
-      apiSocket.emit('printer:status', { printerId: printer.id, serialNumber: serial, cameraUrl: camUrl });
-    }
-    if (apiSocket2?.connected) {
-      apiSocket2.emit('printer:status', { printerId: printer.id, serialNumber: serial, cameraUrl: camUrl });
-    }
-  });
-  if (printers.size > 0) sendLog('Lokale URLs gesetzt für ' + printers.size + ' Drucker (Fallback, kein Tunnel)');
-}
-
-const TUNNEL_BASE_URL = 'https://bridge.vafrum-core.de';
-const TUNNEL_TOKEN = 'eyJhIjoiYmVmNzRkMTBkNGQ5ZDdjOThhMDEzODZlYjBjNTRhMTkiLCJ0IjoiNTgwMTM2MTgtODhiMy00ZmZlLWE0ZGItNjU2M2RmOWMyNmMxIiwicyI6Ik5HSXlNVFkyTTJVdE56VXpNUzAwT0RBMExUZzBNRFV0TkdWbE5UazFNamRoTldKaiJ9';
-
-function startTunnel() {
-  const locations = [
-    path.join(process.resourcesPath, 'cloudflared.exe'),
-    path.join(process.env.PORTABLE_EXECUTABLE_DIR || '', 'cloudflared.exe'),
-    path.join(path.dirname(process.execPath), 'cloudflared.exe'),
-    path.join(__dirname, 'cloudflared.exe')
-  ];
-
-  let cfPath = null;
-  for (const loc of locations) {
-    sendLog('Suche cloudflared: ' + loc + ' → ' + (loc && fs.existsSync(loc) ? 'GEFUNDEN' : 'nicht da'));
-    if (!cfPath && loc && fs.existsSync(loc)) { cfPath = loc; }
-  }
-
-  if (!cfPath) {
-    sendLog('cloudflared.exe nicht gefunden an keinem Pfad! Lokale URLs als Fallback.');
-    setLocalCameraUrls();
-    return;
-  }
-
-  // Tunnel-URL ist fest (Named Tunnel)
-  config.tunnelUrl = TUNNEL_BASE_URL;
-  sendLog('Starte Named Tunnel (bridge.vafrum-core.de)...');
-
-  tunnelProcess = spawn(cfPath, ['tunnel', '--url', 'http://localhost:' + MJPEG_PORT, 'run', '--token', TUNNEL_TOKEN], { windowsHide: true });
-
-  tunnelProcess.stdout.on('data', (data) => {
-    sendLog('cloudflared stdout: ' + data.toString().trim().substring(0, 200));
-  });
-
-  tunnelProcess.stderr.on('data', (data) => {
-    const output = data.toString();
-    const lines = output.trim().split('\n');
-    lines.forEach(line => {
-      if (line.trim()) sendLog('cloudflared: ' + line.trim().substring(0, 200));
-    });
-
-    // Named Tunnel: Verbindung registriert
-    if (output.includes('Registered tunnel connection') || output.includes('connIndex=')) {
-      tunnelRestartAttempts = 0;
-      sendLog('Named Tunnel aktiv: ' + TUNNEL_BASE_URL);
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send('config-loaded', config);
-      }
-      // Camera URLs aktualisieren
-      updateAllCameraUrls();
-    }
-  });
-
-  tunnelProcess.on('error', (e) => sendLog('Tunnel Fehler: ' + e.message));
-  tunnelProcess.on('close', (code) => {
-    sendLog('Tunnel beendet (Code: ' + code + ')');
-    tunnelProcess = null;
-
-    // Auto-Restart mit Backoff: 5s, 10s, 20s, 40s, max 300s
-    const delay = Math.min(5000 * Math.pow(2, tunnelRestartAttempts), 300000);
-    const delaySec = Math.round(delay / 1000);
-    tunnelRestartAttempts++;
-
-    sendLog('Tunnel Neustart in ' + delaySec + 's (Versuch ' + tunnelRestartAttempts + ')');
-    tunnelRestartTimer = setTimeout(() => {
-      tunnelRestartTimer = null;
-      startTunnel();
-    }, delay);
-  });
-}
-
-function updateAllCameraUrls() {
-  printers.forEach((printer, serial) => {
-    const group = getStreamGroup(printer.model);
-    const camUrl = group === 1
-      ? TUNNEL_BASE_URL + '/stream/' + serial
-      : TUNNEL_BASE_URL + '/stream.html?src=cam_' + serial;
-    cameraUrls.set(serial, camUrl);
-    sendLog('URL aktualisiert: ' + serial + ' -> ' + camUrl);
-
-    if (apiSocket?.connected) {
-      apiSocket.emit('printer:status', {
-        printerId: printer.id,
-        serialNumber: serial,
-        cameraUrl: camUrl
-      });
-    }
-    if (apiSocket2?.connected) {
-      apiSocket2.emit('printer:status', {
-        printerId: printer.id,
-        serialNumber: serial,
-        cameraUrl: camUrl
-      });
-    }
-  });
-}
+// Tunnel-Code komplett entfernt – alles läuft über Socket.IO Frame-Relay
 
 // === StreamManager: Zentraler Einstiegspunkt ===
 function addCameraStream(serial, accessCode, ip, model) {
@@ -1648,7 +1501,7 @@ function addCameraStream(serial, accessCode, ip, model) {
     return;
   }
 
-  // Gruppe 2: RTSPS Port 322 via go2rtc → MSE Player
+  // Gruppe 2: RTSPS Port 322 via go2rtc → MJPEG auslesen → Frame-Relay an Backend
   if (!go2rtcReady) {
     sendLog('go2rtc nicht bereit, Stream ' + serial + ' wird in Warteschlange gestellt');
     pendingStreams.push({ serial, accessCode, ip, model });
@@ -1663,24 +1516,32 @@ function addCameraStream(serial, accessCode, ip, model) {
   // Stream zur Map hinzufügen
   cameraStreams.set(streamName, streamUrl);
 
-  // URL sofort setzen - stream.html für WebRTC/MSE (go2rtc kann H264 NICHT als MJPEG liefern!)
-  const baseUrl = TUNNEL_BASE_URL || ('http://' + localIp + ':' + MJPEG_PORT);
-  const streamHtmlUrl = baseUrl + '/stream.html?src=' + streamName;
-  cameraUrls.set(serial, streamHtmlUrl);
-  sendLog('Stream URL gesetzt: ' + streamName + ' -> ' + streamHtmlUrl);
-
-  // Stream via API hinzufügen (ohne Neustart)
+  // Stream via go2rtc API hinzufügen: erst RTSP-Source, dann FFmpeg-Transcoder für MJPEG
   const apiUrl = 'http://127.0.0.1:1984/api/streams?name=' + encodeURIComponent(streamName) + '&src=' + encodeURIComponent(streamUrl);
 
   const req = http.request(apiUrl, { method: 'PUT' }, (res) => {
-    // Response data muss konsumiert werden
     res.on('data', () => {});
     res.on('end', () => {
       if (res.statusCode === 200) {
-        sendLog('Stream via API hinzugefügt: ' + streamName);
+        sendLog('RTSP-Stream hinzugefügt: ' + streamName);
+        // Zweite Source: FFmpeg H264→MJPEG Transcoder hinzufügen
+        const ffmpegSrc = 'ffmpeg:' + streamName + '#video=mjpeg';
+        const ffmpegApiUrl = 'http://127.0.0.1:1984/api/streams?name=' + encodeURIComponent(streamName) + '&src=' + encodeURIComponent(ffmpegSrc);
+        const ffmpegReq = http.request(ffmpegApiUrl, { method: 'PUT' }, (fRes) => {
+          fRes.on('data', () => {});
+          fRes.on('end', () => {
+            sendLog('FFmpeg-Transcoder hinzugefügt: ' + streamName + ' (Status: ' + fRes.statusCode + ')');
+            // Starte Frame-Relay: go2rtc MJPEG → JPEG-Frames → Socket.IO
+            setTimeout(() => startRtspFrameRelay(serial, streamName), 3000);
+          });
+        });
+        ffmpegReq.on('error', (e) => {
+          sendLog('FFmpeg-API Fehler: ' + e.message + ' – versuche Frame-Relay trotzdem');
+          setTimeout(() => startRtspFrameRelay(serial, streamName), 3000);
+        });
+        ffmpegReq.end();
       } else {
         sendLog('Stream API Status: ' + res.statusCode + ', nutze Fallback');
-        // Fallback: go2rtc mit Config neustarten
         if (go2rtcRestartTimer) clearTimeout(go2rtcRestartTimer);
         go2rtcRestartTimer = setTimeout(() => restartGo2rtcWithAllStreams(), 2000);
       }
@@ -1689,34 +1550,226 @@ function addCameraStream(serial, accessCode, ip, model) {
 
   req.on('error', (e) => {
     sendLog('Stream API Fehler: ' + e.message + ', nutze Fallback');
-    // Fallback: go2rtc mit Config neustarten
     if (go2rtcRestartTimer) clearTimeout(go2rtcRestartTimer);
-    go2rtcRestartTimer = setTimeout(() => restartGo2rtcWithAllStreams(), 2000);
+    go2rtcRestartTimer = setTimeout(() => {
+      restartGo2rtcWithAllStreams();
+      setTimeout(() => startRtspFrameRelay(serial, streamName), 5000);
+    }, 2000);
   });
 
   req.end();
 }
 
+// H-Serie Frame-Relay: Liest go2rtc MJPEG-Output und sendet JPEG-Frames per Socket.IO
+let rtspFrameRelays = new Map(); // serial -> { request, buffer, active, ... }
+
+function startRtspFrameRelay(serial, streamName) {
+  if (rtspFrameRelays.has(serial)) {
+    sendLog('[RTSP-Relay] Bereits aktiv: ' + serial);
+    return;
+  }
+
+  const go2rtcMjpegUrl = 'http://127.0.0.1:1984/api/stream.mjpeg?src=' + encodeURIComponent(streamName);
+  sendLog('[RTSP-Relay] Starte für ' + serial + ': ' + go2rtcMjpegUrl);
+
+  const relayData = {
+    request: null,
+    buffer: Buffer.alloc(0),
+    active: true,
+    lastFrameTime: 0,
+    frameCount: 0,
+    lastSendTime: 0,
+    reconnectAttempts: 0,
+    watchdogTimer: null
+  };
+  rtspFrameRelays.set(serial, relayData);
+
+  // Watchdog: Reconnect nach 60s ohne Frames, go2rtc-Neustart nach 3 Fehlversuchen
+  relayData.watchdogRetries = 0;
+  relayData.watchdogTimer = setInterval(() => {
+    if (!relayData.active) { clearInterval(relayData.watchdogTimer); return; }
+    const now = Date.now();
+    if (relayData.lastFrameTime > 0 && now - relayData.lastFrameTime > 60000) {
+      relayData.watchdogRetries++;
+      if (relayData.watchdogRetries >= 3) {
+        sendLog('[RTSP-Relay] Kein Frame seit ' + (relayData.watchdogRetries * 30) + 's, go2rtc komplett neustarten');
+        relayData.watchdogRetries = 0;
+        if (go2rtcRestartTimer) clearTimeout(go2rtcRestartTimer);
+        go2rtcRestartTimer = setTimeout(() => restartGo2rtcWithAllStreams(), 1000);
+      } else {
+        sendLog('[RTSP-Relay] Kein Frame seit 60s, reconnect: ' + serial + ' (Versuch ' + relayData.watchdogRetries + '/3)');
+        reconnectRtspRelay(serial, streamName);
+      }
+    }
+  }, 30000);
+
+  connectRtspRelay(serial, streamName, relayData);
+}
+
+function connectRtspRelay(serial, streamName, relayData) {
+  const go2rtcMjpegUrl = 'http://127.0.0.1:1984/api/stream.mjpeg?src=' + encodeURIComponent(streamName);
+
+  const req = http.get(go2rtcMjpegUrl, (res) => {
+    if (res.statusCode !== 200) {
+      sendLog('[RTSP-Relay] go2rtc Status ' + res.statusCode + ' für ' + serial + ' (Versuch ' + (relayData.reconnectAttempts + 1) + ')');
+      res.resume();
+      if (relayData.active) {
+        relayData.reconnectAttempts++;
+        // Nach 5 fehlgeschlagenen Versuchen: go2rtc komplett neustarten (RTSP-Stream tot)
+        if (relayData.reconnectAttempts >= 5) {
+          sendLog('[RTSP-Relay] ' + relayData.reconnectAttempts + ' Fehlversuche für ' + serial + ' – go2rtc Neustart');
+          relayData.reconnectAttempts = 0;
+          if (go2rtcRestartTimer) clearTimeout(go2rtcRestartTimer);
+          go2rtcRestartTimer = setTimeout(() => restartGo2rtcWithAllStreams(), 1000);
+        } else {
+          const delay = Math.min(5000 * Math.pow(1.5, relayData.reconnectAttempts), 30000);
+          setTimeout(() => { if (relayData.active) connectRtspRelay(serial, streamName, relayData); }, delay);
+        }
+      }
+      return;
+    }
+
+    relayData.reconnectAttempts = 0;
+    sendLog('[RTSP-Relay] Verbunden: ' + serial);
+
+    res.on('data', (chunk) => {
+      relayData.buffer = Buffer.concat([relayData.buffer, chunk]);
+      processRtspFrameBuffer(serial, relayData);
+    });
+
+    res.on('end', () => {
+      sendLog('[RTSP-Relay] Stream beendet: ' + serial + ' (Versuch ' + (relayData.reconnectAttempts + 1) + ')');
+      if (relayData.active) {
+        relayData.reconnectAttempts++;
+        if (relayData.reconnectAttempts >= 5) {
+          sendLog('[RTSP-Relay] Stream ' + serial + ' wiederholt beendet – go2rtc Neustart');
+          relayData.reconnectAttempts = 0;
+          if (go2rtcRestartTimer) clearTimeout(go2rtcRestartTimer);
+          go2rtcRestartTimer = setTimeout(() => restartGo2rtcWithAllStreams(), 1000);
+        } else {
+          const delay = Math.min(5000 * Math.pow(1.5, relayData.reconnectAttempts), 30000);
+          setTimeout(() => { if (relayData.active) connectRtspRelay(serial, streamName, relayData); }, delay);
+        }
+      }
+    });
+
+    res.on('error', (err) => {
+      sendLog('[RTSP-Relay] Stream-Fehler ' + serial + ': ' + err.message);
+    });
+  });
+
+  req.on('error', (err) => {
+    sendLog('[RTSP-Relay] Verbindungsfehler ' + serial + ': ' + err.message);
+    if (relayData.active) {
+      const delay = Math.min(5000 * Math.pow(1.5, relayData.reconnectAttempts), 30000);
+      relayData.reconnectAttempts++;
+      setTimeout(() => { if (relayData.active) connectRtspRelay(serial, streamName, relayData); }, delay);
+    }
+  });
+
+  relayData.request = req;
+}
+
+function processRtspFrameBuffer(serial, relayData) {
+  const JPEG_START = Buffer.from([0xFF, 0xD8]);
+  const JPEG_END = Buffer.from([0xFF, 0xD9]);
+
+  while (true) {
+    const startIdx = relayData.buffer.indexOf(JPEG_START);
+    if (startIdx === -1) { relayData.buffer = Buffer.alloc(0); return; }
+    if (startIdx > 0) { relayData.buffer = relayData.buffer.slice(startIdx); }
+
+    const endIdx = relayData.buffer.indexOf(JPEG_END, 2);
+    if (endIdx === -1) return; // Warten auf mehr Daten
+
+    const jpegData = relayData.buffer.slice(0, endIdx + 2);
+    relayData.buffer = relayData.buffer.slice(endIdx + 2);
+
+    if (jpegData.length > 100) {
+      relayData.lastFrameTime = Date.now();
+      relayData.frameCount++;
+
+      // Throttle: max 5fps (alle 200ms)
+      const now = Date.now();
+      if (now - relayData.lastSendTime < 200) continue;
+      relayData.lastSendTime = now;
+
+      // Lokal für Express-Server speichern (für /stream/:serial und /frame/:serial)
+      if (!jpegStreams.has(serial)) {
+        jpegStreams.set(serial, { socket: null, lastFrame: null, lastFrameTime: 0, clients: new Set(), reconnectAttempts: 0, buffer: Buffer.alloc(0), watchdogTimer: null, accessCode: '', ip: '' });
+      }
+      const streamData = jpegStreams.get(serial);
+      streamData.lastFrame = jpegData;
+      streamData.lastFrameTime = now;
+
+      // An lokale MJPEG-Clients senden
+      if (streamData.clients.size > 0) {
+        streamData.clients.forEach(client => sendJpegFrame(client, jpegData));
+      }
+
+      // Frame an API-Server senden (jeden Frame, 200ms Throttle = max 5fps)
+      if (apiSocket?.connected) {
+        apiSocket.emit('bridge:frame', { serial, frame: jpegData.toString('base64'), ts: now });
+      }
+
+      if (relayData.frameCount % 30 === 1) {
+        sendLog('[RTSP-Relay] Frame: ' + serial + ' (' + jpegData.length + ' bytes, #' + relayData.frameCount + ')');
+      }
+    }
+  }
+}
+
+function reconnectRtspRelay(serial, streamName) {
+  const relay = rtspFrameRelays.get(serial);
+  if (!relay) return;
+  if (relay.request) { try { relay.request.destroy(); } catch {} }
+  relay.buffer = Buffer.alloc(0);
+  relay.reconnectAttempts = 0;
+  connectRtspRelay(serial, streamName, relay);
+}
+
+function stopRtspFrameRelay(serial) {
+  const relay = rtspFrameRelays.get(serial);
+  if (relay) {
+    relay.active = false;
+    if (relay.watchdogTimer) clearInterval(relay.watchdogTimer);
+    if (relay.request) { try { relay.request.destroy(); } catch {} }
+    rtspFrameRelays.delete(serial);
+    sendLog('[RTSP-Relay] Gestoppt: ' + serial);
+  }
+}
+
 function restartGo2rtcWithAllStreams() {
+  // Alle laufenden RTSP Frame-Relays stoppen (werden nach Neustart neu gestartet)
+  rtspFrameRelays.forEach((relay, serial) => stopRtspFrameRelay(serial));
+
   const go2rtcConfigPath = path.join(path.dirname(configPath), 'go2rtc.yaml');
 
-  // Alle Streams in die Config schreiben
+  // Alle Streams in die Config schreiben (mit FFmpeg-Transcoder für MJPEG)
   let streamsConfig = '';
   cameraStreams.forEach((url, name) => {
-    streamsConfig += `  ${name}: "${url}"\n`;
+    streamsConfig += `  ${name}:\n    - "${url}"\n    - "ffmpeg:${name}#video=mjpeg"\n`;
   });
+
+  // FFmpeg-Pfad: userData-Kopie nutzen (kein Leerzeichen im Pfad)
+  const userDataFfmpeg = path.join(app.getPath('userData'), 'ffmpeg.exe');
+  const ffmpegSection = fs.existsSync(userDataFfmpeg) ? `\nffmpeg:\n  bin: "${userDataFfmpeg.replace(/\\/g, '/')}"\n` : '';
 
   const configContent = `api:
   listen: "127.0.0.1:1984"
 streams:
-${streamsConfig}`;
+${streamsConfig}${ffmpegSection}`;
 
   try {
     fs.writeFileSync(go2rtcConfigPath, configContent);
     sendLog('go2rtc Config geschrieben mit ' + cameraStreams.size + ' Streams');
 
-    // Alten Prozess beenden
+    // Watchdog deaktivieren (verhindert Doppel-Restart durch close-Handler)
+    if (go2rtcWatchdogTimer) { clearTimeout(go2rtcWatchdogTimer); go2rtcWatchdogTimer = null; }
+
+    // Alten Prozess beenden – close-Handler entfernen damit kein Watchdog-Restart ausgelöst wird
     if (go2rtcProcess) {
+      go2rtcProcess.removeAllListeners('close');
       go2rtcProcess.kill();
       go2rtcProcess = null;
     }
@@ -1724,14 +1777,7 @@ ${streamsConfig}`;
     // Kurz warten bis Port frei ist, dann neu starten
     setTimeout(() => {
       startGo2rtcWithConfig(go2rtcConfigPath);
-      // URLs für X1/H2 Streams aktualisieren - stream.html für WebRTC/MSE
-      const baseUrl = TUNNEL_BASE_URL || ('http://' + localIp + ':' + MJPEG_PORT);
-      cameraStreams.forEach((url, name) => {
-        const serialFromName = name.replace('cam_', '');
-        const streamHtmlUrl = baseUrl + '/stream.html?src=' + name;
-        cameraUrls.set(serialFromName, streamHtmlUrl);
-      });
-      sendLog('Kamera URLs aktualisiert für ' + cameraStreams.size + ' Streams');
+      sendLog('go2rtc neu gestartet mit ' + cameraStreams.size + ' Streams');
     }, 500);
   } catch (e) {
     sendLog('Kamera Config Fehler: ' + e.message);
@@ -1763,16 +1809,25 @@ function startGo2rtcWithConfig(configPath) {
     if (msg) sendLog('go2rtc: ' + msg.substring(0, 200));
   });
   go2rtcProcess.on('error', (e) => sendLog('go2rtc Fehler: ' + e.message));
+  go2rtcProcess.on('close', (code) => {
+    sendLog('go2rtc beendet (Code: ' + code + ')');
+    go2rtcProcess = null;
+    go2rtcReady = false;
+  });
+  go2rtcReady = true;
   sendLog('go2rtc neu gestartet');
-}
 
-ipcMain.handle('set-tunnel', (e, tunnelUrl) => {
-  // Named Tunnel – URL ist fest bridge.vafrum-core.de
-  config.tunnelUrl = TUNNEL_BASE_URL;
-  saveConfig({ tunnelUrl: TUNNEL_BASE_URL });
-  sendLog('Tunnel URL: ' + TUNNEL_BASE_URL);
-  updateAllCameraUrls();
-});
+  // Frame-Relays für alle H-Serie Streams starten (nach 3s warten bis go2rtc bereit)
+  setTimeout(() => {
+    cameraStreams.forEach((url, streamName) => {
+      const serial = streamName.replace('cam_', '');
+      if (!rtspFrameRelays.has(serial)) {
+        sendLog('[RTSP-Relay] Starte nach go2rtc-Restart: ' + serial);
+        startRtspFrameRelay(serial, streamName);
+      }
+    });
+  }, 3000);
+}
 
 // Version-Handler
 ipcMain.handle('get-version', () => {
@@ -1875,8 +1930,10 @@ app.on('window-all-closed', () => {
   // Alle Reconnect-Timer stoppen
   printerReconnectTimers.forEach(timer => clearTimeout(timer));
   printerReconnectTimers.clear();
-  if (tunnelRestartTimer) { clearTimeout(tunnelRestartTimer); tunnelRestartTimer = null; }
   if (go2rtcWatchdogTimer) { clearTimeout(go2rtcWatchdogTimer); go2rtcWatchdogTimer = null; }
+
+  // RTSP Frame-Relays stoppen
+  rtspFrameRelays.forEach((relay, serial) => stopRtspFrameRelay(serial));
 
   // Log Stream schließen
   if (rawMqttLogStream) {
@@ -1894,10 +1951,6 @@ app.on('window-all-closed', () => {
   // go2rtc stoppen
   if (go2rtcProcess) {
     go2rtcProcess.kill();
-  }
-  // Tunnel stoppen
-  if (tunnelProcess) {
-    tunnelProcess.kill();
   }
   disconnectApi();
   app.quit();
