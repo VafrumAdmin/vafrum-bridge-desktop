@@ -436,6 +436,30 @@ function connectPrinter(printer) {
             // Full tray update received - rebuild units and trays
             ams.units = [];
             ams.trays = [];
+            // Einmalig: Alle Felder der AMS-Units loggen
+            if (!client._amsFieldsLogged && isH2Model) {
+              p.ams.ams.forEach((unit, ui) => {
+                sendLog(`[AMS-RAW] Unit ${ui} keys: ${Object.keys(unit).filter(k => k !== 'tray').join(',')}`);
+                const fields = {};
+                for (const k of Object.keys(unit)) {
+                  if (k !== 'tray') fields[k] = unit[k];
+                }
+                sendLog(`[AMS-RAW] Unit ${ui} data: ${JSON.stringify(fields)}`);
+              });
+              if (p.ams.ams_extruder_map !== undefined) sendLog(`[AMS-RAW] ams_extruder_map: ${JSON.stringify(p.ams.ams_extruder_map)}`);
+              if (p.ams.ctype !== undefined) sendLog(`[AMS-RAW] ctype: ${JSON.stringify(p.ams.ctype)}`);
+              // Alle top-level ams Felder loggen
+              const amsKeys = Object.keys(p.ams).filter(k => k !== 'ams');
+              sendLog(`[AMS-RAW] ams top-keys: ${amsKeys.join(',')}`);
+              const amsTopData = {};
+              for (const k of amsKeys) {
+                if (typeof p.ams[k] !== 'object' || p.ams[k] === null) amsTopData[k] = p.ams[k];
+                else amsTopData[k] = JSON.stringify(p.ams[k]).substring(0, 200);
+              }
+              sendLog(`[AMS-RAW] ams top-data: ${JSON.stringify(amsTopData)}`);
+              client._amsFieldsLogged = true;
+            }
+
             p.ams.ams.forEach((unit, unitIdx) => {
               // Store unit-level info (humidity per AMS)
               // humidity_raw = actual percentage (AMS 2 Pro)
