@@ -453,12 +453,21 @@ function connectPrinter(printer) {
 
               // H2-Serie: AMS info-Feld enthält Düsen-Zuordnung (Bit 8)
               // Bit 8 = 0 → linke Düse (nozzle 0), Bit 8 = 1 → rechte Düse (nozzle 1)
+              // Wert ist sticky: einmal gesetzt, bleibt er stabil (Firmware sendet instabile Werte)
               if (unit.info !== undefined) {
                 const infoVal = typeof unit.info === 'string' ? parseInt(unit.info) : unit.info;
                 const bit8 = (infoVal >> 8) & 0x1;
-                unitData.nozzle = bit8; // 0 = links, 1 = rechts
+                if (!client._amsNozzleLock) client._amsNozzleLock = {};
+                const lockKey = `unit_${unitIdx}`;
+                if (client._amsNozzleLock[lockKey] === undefined) {
+                  client._amsNozzleLock[lockKey] = bit8;
+                }
+                unitData.nozzle = client._amsNozzleLock[lockKey];
                 unitData._infoRaw = infoVal;
-                sendLog(`AMS Unit ${unitIdx} info raw=${unit.info} parsed=${infoVal} hex=0x${infoVal.toString(16)} bit8=${bit8} → nozzle=${bit8}`);
+                // Nur einmal pro Verbindung loggen
+                if (!client._amsInfoLogged) {
+                  sendLog(`AMS Unit ${unitIdx} info raw=${unit.info} parsed=${infoVal} hex=0x${infoVal.toString(16)} bit8=${bit8} → nozzle=${client._amsNozzleLock[lockKey]} (locked)`);
+                }
               }
 
               // Nur Feuchtigkeit senden wenn tatsächlich Daten vorhanden
@@ -505,18 +514,18 @@ function connectPrinter(printer) {
           }
         }
 
-        // H2-Serie: AMS-zu-Nozzle-Diagnose (logge Extruder + AMS-Unit Info)
-        if (isH2Model && ams && ams.units.length > 0) {
+        // AMS-Info einmal loggen, dann Flag setzen
+        if (isH2Model && ams && ams.units.length > 0 && !client._amsInfoLogged) {
+          client._amsInfoLogged = true;
           const deviceExt = p.device?.extruder?.info;
-          if (Array.isArray(deviceExt) && !client._extruderAmsLogged) {
+          if (Array.isArray(deviceExt)) {
             deviceExt.forEach((ext, i) => {
               sendLog(`[AMS-NOZZLE] Extruder[${i}]: id=${ext.id} hnow=${ext.hnow} hpre=${ext.hpre} htar=${ext.htar} info=${ext.info} snow=${ext.snow}`);
             });
-            ams.units.forEach(u => {
-              sendLog(`[AMS-NOZZLE] AMS Unit ${u.id}: nozzle=${u.nozzle} _infoRaw=${u._infoRaw}`);
-            });
-            client._extruderAmsLogged = true;
           }
+          ams.units.forEach(u => {
+            sendLog(`[AMS-NOZZLE] AMS Unit ${u.id}: nozzle=${u.nozzle} _infoRaw=${u._infoRaw}`);
+          });
         }
 
         // Parse external spool: vt_tray (Standard) oder vir_slot (H2D Dual-Nozzle)
