@@ -475,31 +475,15 @@ function connectPrinter(printer) {
                 temp: parseFloat(unit.temp) || 0
               };
 
-              // H2-Serie: AMS info-Feld enthält Düsen-Zuordnung (Bit 8)
-              // Bit 8 = 0 → linke Düse (nozzle 0), Bit 8 = 1 → rechte Düse (nozzle 1)
-              // WICHTIG: Nur Batch-Updates (mehrere Units) liefern korrekte Werte.
-              // Einzel-Updates (1 Unit) senden falschen info-Wert → vorherigen nozzle-Wert behalten.
-              const isBatchUpdate = p.ams.ams.length > 1;
-              if (unit.info !== undefined) {
-                const infoVal = typeof unit.info === 'string' ? parseInt(unit.info) : unit.info;
-                const bit8 = (infoVal >> 8) & 0x1;
-                unitData._infoRaw = infoVal;
-
-                if (!client._amsNozzleCache) client._amsNozzleCache = {};
-                if (isBatchUpdate) {
-                  // Batch-Update: Wert übernehmen und cachen
-                  client._amsNozzleCache[unitIdx] = bit8;
-                  unitData.nozzle = bit8;
-                } else if (client._amsNozzleCache[unitIdx] !== undefined) {
-                  // Einzel-Update: gecachten Wert vom letzten Batch verwenden
-                  unitData.nozzle = client._amsNozzleCache[unitIdx];
-                } else {
-                  // Noch kein Batch empfangen: Wert trotzdem setzen
-                  unitData.nozzle = bit8;
-                }
-
-                if (!client._amsInfoLogged) {
-                  sendLog(`AMS Unit ${unitIdx} info=${infoVal} bit8=${bit8} batch=${isBatchUpdate} → nozzle=${unitData.nozzle}`);
+              // H2-Serie: Nozzle-Zuordnung über ctype-Feld der Trays (0=links, 1=rechts)
+              // ctype ist das offizielle Feld von Bambu Lab für die Extruder-Zuordnung
+              if (Array.isArray(unit.tray) && unit.tray.length > 0) {
+                const firstTrayWithCtype = unit.tray.find(t => t.ctype !== undefined);
+                if (firstTrayWithCtype) {
+                  unitData.nozzle = firstTrayWithCtype.ctype;
+                  if (!client._amsInfoLogged) {
+                    sendLog(`AMS Unit ${unitIdx} ctype=${firstTrayWithCtype.ctype} → nozzle=${unitData.nozzle}`);
+                  }
                 }
               }
 
