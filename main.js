@@ -457,6 +457,8 @@ function connectPrinter(printer) {
                 const infoVal = typeof unit.info === 'string' ? parseInt(unit.info) : unit.info;
                 const bit8 = (infoVal >> 8) & 0x1;
                 unitData.nozzle = bit8; // 0 = links, 1 = rechts
+                unitData._infoRaw = infoVal;
+                sendLog(`AMS Unit ${unitIdx} info raw=${unit.info} parsed=${infoVal} hex=0x${infoVal.toString(16)} bit8=${bit8} → nozzle=${bit8}`);
               }
 
               // Nur Feuchtigkeit senden wenn tatsächlich Daten vorhanden
@@ -500,6 +502,20 @@ function connectPrinter(printer) {
                 });
               }
             });
+          }
+        }
+
+        // H2-Serie: AMS-zu-Nozzle-Diagnose (logge Extruder + AMS-Unit Info)
+        if (isH2Model && ams && ams.units.length > 0) {
+          const deviceExt = p.device?.extruder?.info;
+          if (Array.isArray(deviceExt) && !client._extruderAmsLogged) {
+            deviceExt.forEach((ext, i) => {
+              sendLog(`[AMS-NOZZLE] Extruder[${i}]: id=${ext.id} hnow=${ext.hnow} hpre=${ext.hpre} htar=${ext.htar} info=${ext.info} snow=${ext.snow}`);
+            });
+            ams.units.forEach(u => {
+              sendLog(`[AMS-NOZZLE] AMS Unit ${u.id}: nozzle=${u.nozzle} _infoRaw=${u._infoRaw}`);
+            });
+            client._extruderAmsLogged = true;
           }
         }
 
@@ -684,10 +700,11 @@ function connectPrinter(printer) {
           _h2debug: isH2 ? {
             printKeys: Object.keys(p).join(','),
             topKeys: Object.keys(data).join(','),
-            device: p.device ? JSON.stringify(p.device).substring(0, 800) : undefined,
+            device: p.device ? JSON.stringify(p.device).substring(0, 2000) : undefined,
             '2D': p['2D'] ? JSON.stringify(p['2D']).substring(0, 300) : undefined,
             '3D': p['3D'] ? JSON.stringify(p['3D']).substring(0, 300) : undefined,
-            info: p.info ? JSON.stringify(p.info).substring(0, 300) : undefined
+            info: p.info ? JSON.stringify(p.info).substring(0, 300) : undefined,
+            amsRaw: p.ams?.ams ? JSON.stringify(p.ams.ams.map(u => ({ id: u.id, info: u.info, temp: u.temp }))).substring(0, 500) : undefined
           } : undefined
         };
         printers.set(printer.serialNumber, { ...printers.get(printer.serialNumber), ...status });
