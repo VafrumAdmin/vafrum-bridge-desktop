@@ -475,16 +475,16 @@ function connectPrinter(printer) {
                 temp: parseFloat(unit.temp) || 0
               };
 
-              // H2-Serie: Nozzle-Zuordnung über ctype-Feld der Trays (0=links, 1=rechts)
-              // ctype ist das offizielle Feld von Bambu Lab für die Extruder-Zuordnung
-              if (Array.isArray(unit.tray) && unit.tray.length > 0) {
-                const firstTrayWithCtype = unit.tray.find(t => t.ctype !== undefined);
-                if (firstTrayWithCtype) {
-                  unitData.nozzle = firstTrayWithCtype.ctype;
-                  if (!client._amsInfoLogged) {
-                    sendLog(`AMS Unit ${unitIdx} ctype=${firstTrayWithCtype.ctype} → nozzle=${unitData.nozzle}`);
-                  }
-                }
+              // H2-Serie: Nozzle-Zuordnung über Unit-ID
+              // ID 0-127 = linke Düse (Extruder 0), ID 128+ = rechte Düse (Extruder 1)
+              const rawUnitId = parseInt(unit.id) || 0;
+              if (rawUnitId >= 128) {
+                unitData.nozzle = 1;
+              } else {
+                unitData.nozzle = 0;
+              }
+              if (!client._amsInfoLogged) {
+                sendLog(`AMS Unit idx=${unitIdx} rawId=${rawUnitId} → nozzle=${unitData.nozzle}`);
               }
 
               // Nur Feuchtigkeit senden wenn tatsächlich Daten vorhanden
@@ -730,7 +730,9 @@ function connectPrinter(printer) {
             '2D': p['2D'] ? JSON.stringify(p['2D']).substring(0, 300) : undefined,
             '3D': p['3D'] ? JSON.stringify(p['3D']).substring(0, 300) : undefined,
             info: p.info ? JSON.stringify(p.info).substring(0, 300) : undefined,
-            amsRaw: p.ams?.ams ? JSON.stringify(p.ams.ams.map(u => ({ id: u.id, info: u.info, temp: u.temp }))).substring(0, 500) : undefined
+            amsRaw: p.ams?.ams ? JSON.stringify(p.ams.ams.map(u => { const o = {}; for (const k of Object.keys(u)) { if (k !== 'tray') o[k] = u[k]; } return o; })).substring(0, 1000) : undefined,
+            amsTraySample: p.ams?.ams?.[0]?.tray?.[0] ? JSON.stringify(Object.keys(p.ams?.ams[0].tray[0])).substring(0, 300) : undefined,
+            amsTray0: p.ams?.ams?.[0]?.tray?.[0] ? JSON.stringify(p.ams.ams[0].tray[0]).substring(0, 500) : undefined
           } : undefined
         };
         printers.set(printer.serialNumber, { ...printers.get(printer.serialNumber), ...status });
