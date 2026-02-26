@@ -453,20 +453,29 @@ function connectPrinter(printer) {
 
               // H2-Serie: AMS info-Feld enthält Düsen-Zuordnung (Bit 8)
               // Bit 8 = 0 → linke Düse (nozzle 0), Bit 8 = 1 → rechte Düse (nozzle 1)
-              // Wert ist sticky: einmal gesetzt, bleibt er stabil (Firmware sendet instabile Werte)
+              // WICHTIG: Nur Batch-Updates (mehrere Units) liefern korrekte Werte.
+              // Einzel-Updates (1 Unit) senden falschen info-Wert → vorherigen nozzle-Wert behalten.
+              const isBatchUpdate = p.ams.ams.length > 1;
               if (unit.info !== undefined) {
                 const infoVal = typeof unit.info === 'string' ? parseInt(unit.info) : unit.info;
                 const bit8 = (infoVal >> 8) & 0x1;
-                if (!client._amsNozzleLock) client._amsNozzleLock = {};
-                const lockKey = `unit_${unitIdx}`;
-                if (client._amsNozzleLock[lockKey] === undefined) {
-                  client._amsNozzleLock[lockKey] = bit8;
-                }
-                unitData.nozzle = client._amsNozzleLock[lockKey];
                 unitData._infoRaw = infoVal;
-                // Nur einmal pro Verbindung loggen
+
+                if (!client._amsNozzleCache) client._amsNozzleCache = {};
+                if (isBatchUpdate) {
+                  // Batch-Update: Wert übernehmen und cachen
+                  client._amsNozzleCache[unitIdx] = bit8;
+                  unitData.nozzle = bit8;
+                } else if (client._amsNozzleCache[unitIdx] !== undefined) {
+                  // Einzel-Update: gecachten Wert vom letzten Batch verwenden
+                  unitData.nozzle = client._amsNozzleCache[unitIdx];
+                } else {
+                  // Noch kein Batch empfangen: Wert trotzdem setzen
+                  unitData.nozzle = bit8;
+                }
+
                 if (!client._amsInfoLogged) {
-                  sendLog(`AMS Unit ${unitIdx} info raw=${unit.info} parsed=${infoVal} hex=0x${infoVal.toString(16)} bit8=${bit8} → nozzle=${client._amsNozzleLock[lockKey]} (locked)`);
+                  sendLog(`AMS Unit ${unitIdx} info=${infoVal} bit8=${bit8} batch=${isBatchUpdate} → nozzle=${unitData.nozzle}`);
                 }
               }
 
