@@ -165,8 +165,8 @@ body {
 
 /* Printers Panel */
 .printers-panel {
-  flex: 0 0 auto;
-  max-height: 200px;
+  flex: 1 1 auto;
+  min-height: 120px;
   overflow: hidden;
   display: flex;
   flex-direction: column;
@@ -175,9 +175,10 @@ body {
 .printers-list {
   flex: 1;
   overflow-y: auto;
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
   gap: 8px;
+  align-content: start;
 }
 
 .empty-state {
@@ -189,21 +190,15 @@ body {
 .printer-card {
   background: #1a1a1a;
   border-radius: 8px;
-  padding: 12px;
+  padding: 10px;
   display: flex;
-  align-items: center;
-  gap: 12px;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
 }
 
 .printer-icon {
-  width: 48px;
-  height: 48px;
-  background: #333;
-  border-radius: 8px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 24px;
+  display: none;
 }
 
 .printer-info {
@@ -212,8 +207,12 @@ body {
 
 .printer-name {
   font-weight: 600;
+  font-size: 13px;
   color: #fff;
-  margin-bottom: 2px;
+  margin-bottom: 1px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .printer-status {
@@ -227,8 +226,9 @@ body {
 
 .printer-temps {
   display: flex;
-  gap: 16px;
-  font-size: 13px;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  font-size: 12px;
 }
 
 .temp-item {
@@ -295,8 +295,8 @@ body {
 
 /* Log Panel */
 .log-panel {
-  flex: 1;
-  min-height: 300px;
+  flex: 0 1 200px;
+  min-height: 100px;
   display: flex;
   flex-direction: column;
   overflow: hidden;
