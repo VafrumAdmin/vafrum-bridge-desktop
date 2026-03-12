@@ -62,6 +62,7 @@ window.bridge.onLog((msg) => {
 
 window.bridge.onApiStatus((status) => {
   statusIndicator.className = 'status-indicator ' + status;
+  const connDetails = document.getElementById('connectionDetails');
 
   const statusText = statusIndicator.querySelector('.status-text');
   switch (status) {
@@ -69,6 +70,7 @@ window.bridge.onApiStatus((status) => {
       statusText.textContent = 'Verbunden';
       connectBtn.disabled = true;
       disconnectBtn.disabled = false;
+      if (connDetails) connDetails.removeAttribute('open');
       break;
     case 'connecting':
       statusText.textContent = 'Verbinde...';
@@ -79,11 +81,13 @@ window.bridge.onApiStatus((status) => {
       statusText.textContent = 'Getrennt';
       connectBtn.disabled = false;
       disconnectBtn.disabled = true;
+      if (connDetails) connDetails.setAttribute('open', '');
       break;
     case 'error':
       statusText.textContent = 'Fehler';
       connectBtn.disabled = false;
       disconnectBtn.disabled = true;
+      if (connDetails) connDetails.setAttribute('open', '');
       break;
   }
 });
