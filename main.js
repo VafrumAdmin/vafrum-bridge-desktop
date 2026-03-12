@@ -181,6 +181,7 @@ function connectToApi(apiUrl, apiKey) {
 
   apiSocket.on('authenticated', () => {
     sendLog('Authentifiziert');
+    startPrinterWatchdog();
     apiSocket.emit('printers:request');
 
     // Sekundären Server verbinden falls konfiguriert
@@ -321,6 +322,7 @@ function connectPrinter(printer) {
     rejectUnauthorized: false,
     clientId: 'vafrum_' + printer.serialNumber + '_' + Date.now(),
     connectTimeout: 15000,
+    keepalive: 30, // Ping alle 30s → erkennt tote Verbindungen nach ~60s
     reconnectPeriod: 0 // Wir machen eigenes Reconnect mit Backoff
   });
 
@@ -328,6 +330,7 @@ function connectPrinter(printer) {
     sendLog('Drucker verbunden: ' + printer.name);
     mqttClients.set(printer.serialNumber, client);
     printers.set(printer.serialNumber, { ...printer, online: true });
+    printerLastDataTime.set(printer.serialNumber, Date.now());
     resetReconnectCounter(printer.serialNumber);
     client.subscribe('device/' + printer.serialNumber + '/report');
     // get_version + pushall senden (wie HA-Integration - triggert device-Daten inkl. CTC)
@@ -341,6 +344,9 @@ function connectPrinter(printer) {
   client.on('message', (topic, message) => {
     try {
       const data = JSON.parse(message.toString());
+
+      // Watchdog: Timestamp aktualisieren
+      printerLastDataTime.set(printer.serialNumber, Date.now());
 
       // Debug: Raw MQTT data to file
       logRawMqtt(printer.serialNumber, topic, data);
@@ -437,7 +443,7 @@ function connectPrinter(printer) {
             ams.units = [];
             ams.trays = [];
             // Einmalig: Alle Felder der AMS-Units loggen
-            if (!client._amsFieldsLogged && isH2Model) {
+            if (!client._amsFieldsLogged && isH2) {
               p.ams.ams.forEach((unit, ui) => {
                 sendLog(`[AMS-RAW] Unit ${ui} keys: ${Object.keys(unit).filter(k => k !== 'tray').join(',')}`);
                 const fields = {};
@@ -475,16 +481,40 @@ function connectPrinter(printer) {
                 temp: parseFloat(unit.temp) || 0
               };
 
-              // H2-Serie: Nozzle-Zuordnung über Unit-ID
-              // ID 0-127 = linke Düse (Extruder 0), ID 128+ = rechte Düse (Extruder 1)
-              const rawUnitId = parseInt(unit.id) || 0;
-              if (rawUnitId >= 128) {
-                unitData.nozzle = 1;
+              // H2-Serie: Nozzle-Zuordnung aus info-Feld (Hex-String)
+              // BambuStudio: Bits 8-11 = Extruder-ID
+              // MAIN_EXTRUDER_ID=0 = rechte Düse (Vortex), DEPUTY_EXTRUDER_ID=1 = linke Düse
+              // 0xE = nicht initialisiert (ignorieren)
+              // Unser Mapping: extruder 0 (Main/rechts) → nozzle=1, extruder 1 (Deputy/links) → nozzle=0
+              if (unit.info !== undefined && unit.info !== '') {
+                const infoInt = parseInt(String(unit.info), 16);
+                if (!isNaN(infoInt)) {
+                  const extruderId = (infoInt >> 8) & 0xF;
+                  if (extruderId === 0xE) {
+                    // AMS nicht initialisiert – Default: linke Düse
+                    unitData.nozzle = 0;
+                  } else if (extruderId === 0) {
+                    // MAIN = rechte Düse (Vortex)
+                    unitData.nozzle = 1;
+                  } else {
+                    // DEPUTY (1) = linke Düse
+                    unitData.nozzle = 0;
+                  }
+                  if (!client._amsInfoLogged) {
+                    sendLog(`AMS Unit idx=${unitIdx} info="${unit.info}" hex=0x${infoInt.toString(16)} extruderId=${extruderId} → nozzle=${unitData.nozzle}`);
+                  }
+                } else {
+                  unitData.nozzle = 0;
+                  if (!client._amsInfoLogged) {
+                    sendLog(`AMS Unit idx=${unitIdx} info="${unit.info}" PARSE_FAIL → nozzle=0`);
+                  }
+                }
               } else {
+                // Kein info-Feld: Default linke Düse
                 unitData.nozzle = 0;
-              }
-              if (!client._amsInfoLogged) {
-                sendLog(`AMS Unit idx=${unitIdx} rawId=${rawUnitId} → nozzle=${unitData.nozzle}`);
+                if (!client._amsInfoLogged) {
+                  sendLog(`AMS Unit idx=${unitIdx} NO_INFO → nozzle=0`);
+                }
               }
 
               // Nur Feuchtigkeit senden wenn tatsächlich Daten vorhanden
@@ -532,7 +562,7 @@ function connectPrinter(printer) {
         }
 
         // AMS-Info einmal loggen, dann Flag setzen
-        if (isH2Model && ams && ams.units.length > 0 && !client._amsInfoLogged) {
+        if (isH2 && ams && ams.units.length > 0 && !client._amsInfoLogged) {
           client._amsInfoLogged = true;
           const deviceExt = p.device?.extruder?.info;
           if (Array.isArray(deviceExt)) {
@@ -754,7 +784,9 @@ function connectPrinter(printer) {
           });
         }
       }
-    } catch (e) {}
+    } catch (e) {
+      sendLog('[MQTT-ERROR] ' + printer.name + ': ' + (e.message || e) + ' stack=' + (e.stack || '').substring(0, 300));
+    }
   });
 
   client.on('error', (err) => {
@@ -769,6 +801,7 @@ function connectPrinter(printer) {
 
   client.on('close', () => {
     mqttClients.delete(printer.serialNumber);
+    printerLastDataTime.delete(printer.serialNumber);
     const pr = printers.get(printer.serialNumber);
     if (pr) {
       printers.set(printer.serialNumber, { ...pr, online: false });
@@ -794,6 +827,37 @@ function connectPrinter(printer) {
     // Auto-Reconnect mit Exponential Backoff
     scheduleReconnect(printer.serialNumber);
   });
+}
+
+// === Printer Data Watchdog ===
+// Prüft ob von jedem verbundenen Drucker Daten kommen. Falls 120s keine Daten → Verbindung tot → Force Reconnect
+let printerLastDataTime = new Map(); // serial -> timestamp
+let printerWatchdogTimer = null;
+
+function startPrinterWatchdog() {
+  if (printerWatchdogTimer) return;
+  printerWatchdogTimer = setInterval(() => {
+    const now = Date.now();
+    for (const [serial, client] of mqttClients.entries()) {
+      const lastData = printerLastDataTime.get(serial) || 0;
+      const silent = now - lastData;
+      // 120s keine Daten → Verbindung wahrscheinlich tot
+      if (lastData > 0 && silent > 120000) {
+        const cached = printerDataCache.get(serial);
+        const name = cached?.name || serial;
+        sendLog('[WATCHDOG] Kein MQTT-Daten seit ' + Math.round(silent / 1000) + 's von ' + name + ' → Force Reconnect');
+        // Alte Verbindung sauber schließen
+        try { client.end(true); } catch (e) { /* ignore */ }
+        mqttClients.delete(serial);
+        printerLastDataTime.delete(serial);
+        // Reconnect einleiten
+        if (cached) {
+          reconnectAttempts.delete(serial); // Counter resetten für frischen Start
+          connectPrinter(cached);
+        }
+      }
+    }
+  }, 30000); // Alle 30s prüfen
 }
 
 // Intelligentes Reconnect mit Exponential Backoff
@@ -1406,9 +1470,15 @@ function processJpegBuffer(serial, streamData) {
 
       // Frame an API-Server senden (max alle 200ms = 5fps, aber JEDEN Frame wenn langsam)
       const now = Date.now();
-      if (apiSocket?.connected && now - (streamData.lastSendTime || 0) >= 200) {
+      if (now - (streamData.lastSendTime || 0) >= 200) {
         streamData.lastSendTime = now;
-        apiSocket.emit('bridge:frame', { serial, frame: jpegData.toString('base64'), ts: now });
+        const framePayload = { serial, frame: jpegData.toString('base64'), ts: now };
+        if (apiSocket?.connected) {
+          apiSocket.emit('bridge:frame', framePayload);
+        }
+        if (apiSocket2?.connected) {
+          apiSocket2.emit('bridge:frame', framePayload);
+        }
       }
 
       // An alle verbundenen Clients senden
@@ -1753,8 +1823,12 @@ function processRtspFrameBuffer(serial, relayData) {
       }
 
       // Frame an API-Server senden (jeden Frame, 200ms Throttle = max 5fps)
+      const framePayload2 = { serial, frame: jpegData.toString('base64'), ts: now };
       if (apiSocket?.connected) {
-        apiSocket.emit('bridge:frame', { serial, frame: jpegData.toString('base64'), ts: now });
+        apiSocket.emit('bridge:frame', framePayload2);
+      }
+      if (apiSocket2?.connected) {
+        apiSocket2.emit('bridge:frame', framePayload2);
       }
 
       if (relayData.frameCount % 30 === 1) {
@@ -1967,6 +2041,52 @@ app.whenReady().then(() => {
     sendLog('Automatischer Update-Check...');
     autoUpdater.checkForUpdates().catch(e => sendLog('Auto-Update-Check fehlgeschlagen: ' + e.message));
   }, 5 * 60 * 1000);
+
+  // === Periodischer Soft-Restart alle 6 Stunden ===
+  // Trennt MQTT + API-Sockets und baut alles sauber neu auf.
+  // Verhindert Memory Leaks, hängende Verbindungen und Stale-State.
+  const SOFT_RESTART_INTERVAL = 6 * 60 * 60 * 1000; // 6 Stunden
+  setInterval(() => {
+    sendLog('⟳ Periodischer Soft-Restart – Verbindungen werden neu aufgebaut...');
+
+    // Alle MQTT-Verbindungen sauber trennen
+    mqttClients.forEach((client, serial) => {
+      try { client.end(true); } catch (e) { /* ignore */ }
+    });
+    mqttClients.clear();
+
+    // JPEG Streams stoppen
+    jpegStreams.forEach((stream, serial) => {
+      try { stopJpegStream(serial); } catch (e) { /* ignore */ }
+    });
+
+    // API-Sockets trennen
+    if (apiSocket) { apiSocket.disconnect(); apiSocket = null; }
+    if (apiSocket2) { apiSocket2.disconnect(); apiSocket2 = null; }
+
+    // Reconnect-Timer aufräumen
+    printerReconnectTimers.forEach(timer => clearTimeout(timer));
+    printerReconnectTimers.clear();
+
+    // go2rtc neu starten
+    if (go2rtcProcess) {
+      try { go2rtcProcess.kill(); } catch (e) { /* ignore */ }
+      go2rtcProcess = null;
+      go2rtcReady = false;
+    }
+    setTimeout(() => startGo2rtc(), 2000);
+
+    // Printers State zurücksetzen (Cache bleibt)
+    printers.clear();
+
+    // Nach kurzer Pause alles neu verbinden
+    setTimeout(() => {
+      if (config.apiUrl && config.apiKey) {
+        connectToApi(config.apiUrl, config.apiKey);
+      }
+      sendLog('⟳ Soft-Restart abgeschlossen – Verbindungen werden aufgebaut');
+    }, 3000);
+  }, SOFT_RESTART_INTERVAL);
 });
 
 app.on('window-all-closed', () => {
