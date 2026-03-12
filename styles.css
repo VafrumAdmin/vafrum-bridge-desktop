@@ -9,15 +9,15 @@ body {
   background: #1a1a1a;
   color: #e0e0e0;
   height: 100vh;
-  overflow: auto;
+  overflow: hidden;
 }
 
 .app {
   display: flex;
   flex-direction: column;
-  min-height: 100vh;
-  padding: 12px;
-  gap: 10px;
+  height: 100vh;
+  padding: 10px;
+  gap: 8px;
 }
 
 /* Header */
@@ -25,12 +25,13 @@ body {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding-bottom: 16px;
+  flex-shrink: 0;
+  padding-bottom: 8px;
   border-bottom: 1px solid #333;
 }
 
 .header h1 {
-  font-size: 18px;
+  font-size: 16px;
   font-weight: 600;
   color: #fff;
 }
@@ -38,15 +39,16 @@ body {
 .status-indicator {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 8px 16px;
+  gap: 6px;
+  padding: 5px 12px;
   background: #252525;
   border-radius: 20px;
+  font-size: 13px;
 }
 
 .status-dot {
-  width: 10px;
-  height: 10px;
+  width: 8px;
+  height: 8px;
   border-radius: 50%;
   background: #666;
 }
@@ -73,17 +75,17 @@ body {
 /* Panels */
 .panel {
   background: #252525;
-  border-radius: 12px;
-  padding: 16px;
+  border-radius: 8px;
+  padding: 10px;
 }
 
 .panel h2 {
-  font-size: 14px;
+  font-size: 12px;
   font-weight: 600;
   color: #888;
   text-transform: uppercase;
   letter-spacing: 0.5px;
-  margin-bottom: 12px;
+  margin-bottom: 8px;
 }
 
 /* Connection Panel */
@@ -106,37 +108,37 @@ body {
 }
 
 .connection-summary h2::before {
-  content: '▶ ';
-  font-size: 10px;
+  content: '\25B6 ';
+  font-size: 9px;
 }
 
 .connection-panel[open] .connection-summary h2::before {
-  content: '▼ ';
+  content: '\25BC ';
 }
 
 .connection-content {
-  margin-top: 12px;
+  margin-top: 10px;
 }
 
 .form-group {
-  margin-bottom: 12px;
+  margin-bottom: 8px;
 }
 
 .form-group label {
   display: block;
-  font-size: 12px;
+  font-size: 11px;
   color: #888;
-  margin-bottom: 4px;
+  margin-bottom: 3px;
 }
 
 .form-group input {
   width: 100%;
-  padding: 10px 12px;
+  padding: 7px 10px;
   background: #1a1a1a;
   border: 1px solid #333;
-  border-radius: 8px;
+  border-radius: 6px;
   color: #fff;
-  font-size: 14px;
+  font-size: 13px;
 }
 
 .form-group input:focus {
@@ -150,10 +152,10 @@ body {
 }
 
 .btn {
-  padding: 10px 20px;
+  padding: 8px 16px;
   border: none;
-  border-radius: 8px;
-  font-size: 14px;
+  border-radius: 6px;
+  font-size: 13px;
   font-weight: 500;
   cursor: pointer;
   transition: all 0.2s;
@@ -183,17 +185,17 @@ body {
 }
 
 .btn-small {
-  padding: 6px 12px;
-  font-size: 12px;
-  margin-left: 8px;
+  padding: 5px 10px;
+  font-size: 11px;
+  margin-left: 6px;
   background: #444;
   color: #fff;
 }
 
-/* Printers Panel */
+/* ====== PRINTERS PANEL – nimmt ALLEN verbleibenden Platz ====== */
 .printers-panel {
-  flex: 1 1 auto;
-  min-height: 120px;
+  flex: 1 1 0;
+  min-height: 0;
   overflow: hidden;
   display: flex;
   flex-direction: column;
@@ -203,24 +205,25 @@ body {
   flex: 1;
   overflow-y: auto;
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
-  gap: 8px;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 6px;
   align-content: start;
 }
 
 .empty-state {
   color: #666;
   text-align: center;
-  padding: 40px;
+  padding: 30px;
+  grid-column: 1 / -1;
 }
 
 .printer-card {
   background: #1a1a1a;
-  border-radius: 8px;
-  padding: 10px;
+  border-radius: 6px;
+  padding: 8px 10px;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 4px;
   min-width: 0;
 }
 
@@ -243,7 +246,7 @@ body {
 }
 
 .printer-status {
-  font-size: 12px;
+  font-size: 11px;
   color: #888;
 }
 
@@ -254,14 +257,15 @@ body {
 .printer-temps {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px 12px;
-  font-size: 12px;
+  gap: 3px 10px;
+  font-size: 11px;
+  margin-top: 2px;
 }
 
 .temp-item {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 3px;
 }
 
 .temp-label {
@@ -274,13 +278,13 @@ body {
 }
 
 .printer-progress {
-  margin-top: 8px;
+  margin-top: 4px;
 }
 
 .progress-bar {
-  height: 6px;
+  height: 4px;
   background: #333;
-  border-radius: 3px;
+  border-radius: 2px;
   overflow: hidden;
 }
 
@@ -291,24 +295,24 @@ body {
 }
 
 .progress-text {
-  font-size: 12px;
+  font-size: 10px;
   color: #888;
-  margin-top: 4px;
+  margin-top: 2px;
 }
 
 .printer-controls {
   display: flex;
-  gap: 4px;
-  margin-top: 8px;
+  gap: 3px;
+  margin-top: 4px;
 }
 
 .ctrl-btn {
-  padding: 6px 12px;
+  padding: 4px 8px;
   background: #333;
   border: none;
-  border-radius: 4px;
+  border-radius: 3px;
   color: #fff;
-  font-size: 12px;
+  font-size: 11px;
   cursor: pointer;
 }
 
@@ -320,10 +324,9 @@ body {
 .ctrl-btn.resume { background: #16a34a; }
 .ctrl-btn.stop { background: #dc2626; }
 
-/* Log Panel */
+/* ====== LOG PANEL – klein unten ====== */
 .log-panel {
-  flex: 0 1 200px;
-  min-height: 100px;
+  flex: 0 0 150px;
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -333,11 +336,11 @@ body {
   flex: 1;
   overflow: auto;
   font-family: 'Consolas', 'Monaco', monospace;
-  font-size: 11px;
-  line-height: 1.4;
+  font-size: 10px;
+  line-height: 1.3;
   background: #0d0d0d;
-  border-radius: 8px;
-  padding: 10px;
+  border-radius: 6px;
+  padding: 6px 8px;
   white-space: pre-wrap;
   word-wrap: break-word;
   word-break: break-word;
@@ -345,7 +348,7 @@ body {
 
 .log-entry {
   color: #888;
-  padding: 2px 0;
+  padding: 1px 0;
   margin: 0;
   white-space: pre-wrap;
   word-wrap: break-word;
@@ -363,11 +366,11 @@ body {
 .update-banner {
   background: linear-gradient(90deg, #16a34a, #22c55e);
   color: #fff;
-  padding: 10px 16px;
+  padding: 8px 12px;
   display: flex;
   justify-content: space-between;
   align-items: center;
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 500;
 }
 
@@ -378,13 +381,13 @@ body {
 .update-actions {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 10px;
 }
 
 .update-progress {
-  font-size: 12px;
+  font-size: 11px;
   background: rgba(0,0,0,0.2);
-  padding: 4px 8px;
+  padding: 3px 6px;
   border-radius: 4px;
 }
 
@@ -415,15 +418,15 @@ body {
 .header-right {
   display: flex;
   align-items: center;
-  gap: 16px;
+  gap: 10px;
 }
 
 .app-version {
-  font-size: 12px;
+  font-size: 11px;
   color: #888;
   background: #1a1a1a;
-  padding: 4px 10px;
-  border-radius: 6px;
+  padding: 3px 8px;
+  border-radius: 4px;
   border: 1px solid #333;
   font-weight: 600;
   font-family: 'Consolas', 'Monaco', monospace;
@@ -431,7 +434,7 @@ body {
 
 /* Scrollbar */
 ::-webkit-scrollbar {
-  width: 8px;
+  width: 6px;
 }
 
 ::-webkit-scrollbar-track {
@@ -440,7 +443,7 @@ body {
 
 ::-webkit-scrollbar-thumb {
   background: #333;
-  border-radius: 4px;
+  border-radius: 3px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
