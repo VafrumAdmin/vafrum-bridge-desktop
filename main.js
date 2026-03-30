@@ -234,8 +234,13 @@ function connectToApi(apiUrl, apiKey) {
     executeCommand(data.serialNumber, data.command);
   });
 
-  apiSocket.on('disconnect', () => {
-    sendLog('API getrennt');
+  apiSocket.on('connect_error', (err) => {
+    sendLog('API Verbindungsfehler: ' + err.message);
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('api-status', 'error');
+  });
+
+  apiSocket.on('disconnect', (reason) => {
+    sendLog('API getrennt: ' + reason);
     if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('api-status', 'disconnected');
   });
 }
