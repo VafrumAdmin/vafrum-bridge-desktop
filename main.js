@@ -90,6 +90,13 @@ function createWindow() {
         connectToApi(config.apiUrl, config.apiKey);
       }, 1000);
     }
+
+    // Sekundaeren Server unabhaengig verbinden
+    if (config.apiUrl2 && config.apiKey2) {
+      setTimeout(() => {
+        connectToApi2(config.apiUrl2, config.apiKey2);
+      }, 2000);
+    }
   });
 }
 
