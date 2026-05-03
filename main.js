@@ -740,15 +740,18 @@ function connectPrinter(printer) {
           // P1S: chamber_light + work_light
           // H2C/H2D/H2S: chamber_light (links) + chamber_light2 (rechts), kein work_light
           // X1C/X1E: chamber_light + work_light
-          chamberLight: p.lights_report ? (
-            p.lights_report.find(l => l.node === 'chamber_light')?.mode === 'on' ||
-            p.lights_report.find(l => l.node === 'chamber_light2')?.mode === 'on'
-          ) : prevStatus.chamberLight,
+          // H2-Serie: chamberLight = nur chamber_light (links), workLight = nur chamber_light2 (rechts)
+          // Andere: chamberLight = chamber_light, workLight = work_light
+          chamberLight: p.lights_report ?
+            p.lights_report.find(l => l.node === 'chamber_light')?.mode === 'on'
+          : prevStatus.chamberLight,
           workLight: p.lights_report ? (
-            p.lights_report.find(l => l.node === 'chamber_light')?.mode === 'on' ||
             p.lights_report.find(l => l.node === 'chamber_light2')?.mode === 'on' ||
             p.lights_report.find(l => l.node === 'work_light')?.mode === 'on'
           ) : prevStatus.workLight,
+          heatbedLight: p.lights_report ?
+            p.lights_report.find(l => l.node === 'heatbed_light')?.mode === 'on'
+          : prevStatus.heatbedLight,
           // Speed
           speedLevel: p.spd_lvl ?? prevStatus.speedLevel,
           speedMagnitude: p.spd_mag ?? prevStatus.speedMagnitude,
@@ -938,12 +941,10 @@ function executeCommand(serialNumber, command) {
       const ledModeCL = cmd.on ? 'on' : 'off';
 
       if (modelUpperCL.includes('H2D') || modelUpperCL.includes('H2S') || modelUpperCL.includes('H2C')) {
-        sendLog('chamberLight H2-Serie (' + modelUpperCL + ') -> sende an chamber_light UND chamber_light2: ' + ledModeCL);
-        const payloadLeft = { system: { sequence_id: '0', command: 'ledctrl', led_node: 'chamber_light', led_mode: ledModeCL, led_on_time: 500, led_off_time: 500, loop_times: 0, interval_time: 0 }, user_id: '1234567890' };
-        const payloadRight = { system: { sequence_id: '0', command: 'ledctrl', led_node: 'chamber_light2', led_mode: ledModeCL, led_on_time: 500, led_off_time: 500, loop_times: 0, interval_time: 0 }, user_id: '1234567890' };
-        client.publish(topic, JSON.stringify(payloadLeft));
-        client.publish(topic, JSON.stringify(payloadRight));
-        return;
+        // H2-Serie: chamberLight = nur linkes Licht (chamber_light)
+        sendLog('chamberLight H2-Serie (' + modelUpperCL + ') -> nur chamber_light (links): ' + ledModeCL);
+        payload = { system: { sequence_id: '0', command: 'ledctrl', led_node: 'chamber_light', led_mode: ledModeCL, led_on_time: 500, led_off_time: 500, loop_times: 0, interval_time: 0 }, user_id: '1234567890' };
+        break;
       }
 
       payload = { system: { sequence_id: '0', command: 'ledctrl', led_node: 'chamber_light', led_mode: ledModeCL, led_on_time: 500, led_off_time: 500, loop_times: 0, interval_time: 0 }, user_id: '1234567890' };
